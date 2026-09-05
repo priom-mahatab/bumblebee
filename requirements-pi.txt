@@ -1,0 +1,7 @@
+# Extra requirements for the Raspberry Pi itself (on top of requirements.txt).
+# picamera2 is NOT pip-installable on macOS — on the Pi, install it via apt
+# instead, since it depends on system libcamera libraries:
+#   sudo apt update && sudo apt install -y python3-picamera2 --no-install-recommends
+# If using a venv on the Pi, create it with --system-site-packages so it can
+# see the apt-installed picamera2.
+gpiozero

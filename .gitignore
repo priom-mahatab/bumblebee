@@ -1,0 +1,9 @@
+.cv/
+__pycache__/
+*.pyc
+.DS_Store
+runs/
+datasets/
+*.pt
+*.onnx
+*.ncnn*

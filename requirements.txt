@@ -1,0 +1,8 @@
+# Dev-machine requirements (laptop/Colab) — lane detection prototyping,
+# BDD100K prep, and YOLO training/evaluation. Pi-only packages (gpiozero,
+# picamera2) live in requirements-pi.txt since they don't install on macOS.
+numpy
+opencv-python
+ultralytics
+matplotlib
+pyyaml
