@@ -1,0 +1,236 @@
+#VRML_SIM R2025a utf8
+# Simulated track for the av-comp-vis car: a two-lane road with a dashed
+# centre line, US speed limit signs, and a 4-way stop.
+#
+# Coordinate system is Webots' ENU default: +x east, +y north, +z up.
+# The main road runs along +x from x=-4 to x=21.5, then a 4-way
+# intersection is centred at x=30 (its arms reach 8.5 m out from centre,
+# so the west arm ends exactly where the main road stops).
+#
+# Lane layout (road width 7 m, 2 lanes):
+#   right/eastbound lane  y in [-3.5, 0]   centre y = -1.75
+#   left/westbound  lane  y in [0, 3.5]    centre y = +1.75
+#   sidewalks              |y| = 3.5 .. 4.3, 0.15 m high
+#   signs sit at |y| = 4.8, just clear of the sidewalk
+#
+# Signs face +x by default, so a sign governing eastbound (+x) traffic is
+# rotated pi about z to face the oncoming driver.
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/road/protos/StraightRoadSegment.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/road/protos/RoadIntersection.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/road/protos/RoadLine.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/StopSign.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/SpeedLimitSign.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/SpeedLimitPanel.proto"
+
+WorldInfo {
+  info [
+    "Two-lane road with lane markings, speed limit signs and a 4-way stop."
+    "Built for testing lane detection and YOLO stop-sign detection without hardware."
+  ]
+  title "av-comp-vis track"
+  basicTimeStep 16
+}
+Viewpoint {
+  orientation 0.4881 -0.4881 -0.7236 1.8888
+  position -14 0 7
+  near 0.5
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+# Dropped 2 cm below the road so the grass doesn't z-fight with the asphalt.
+Floor {
+  translation 18 0 -0.02
+  name "ground"
+  size 140 80
+  appearance PBRAppearance {
+    baseColor 0.36 0.45 0.24
+    roughness 1
+    metalness 0
+  }
+}
+
+# --- Road network ---------------------------------------------------------
+
+StraightRoadSegment {
+  translation -4 0 0
+  name "main road"
+  id "main"
+  width 7
+  numberOfLanes 2
+  numberOfForwardLanes 1
+  length 25.5
+  speedLimit 11.2
+  lines [
+    RoadLine {
+      type "dashed"
+      color 1 1 1
+      width 0.15
+    }
+  ]
+  endJunction "junction"
+}
+
+RoadIntersection {
+  translation 30 0 0
+  name "junction"
+  id "junction"
+  roadNumber 4
+  roadsWidth 7
+  startRoadsLength [
+    5
+  ]
+  startRoadsNumberOfLanes 2
+  startRoadsLine [
+    RoadLine {
+      type "dashed"
+      color 1 1 1
+      width 0.15
+    }
+  ]
+}
+
+# --- Painted stop bars ----------------------------------------------------
+# Plain static Solids (no boundingObject/physics) laid 1.5 cm above the
+# asphalt, one per approach, covering only that approach's own lane.
+
+Solid {
+  translation 26.2 -1.75 0.015
+  name "stop bar west approach"
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 1 1 1
+        roughness 0.8
+        metalness 0
+      }
+      geometry Box {
+        size 0.4 3.5 0.02
+      }
+    }
+  ]
+  locked TRUE
+}
+Solid {
+  translation 33.8 1.75 0.015
+  name "stop bar east approach"
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 1 1 1
+        roughness 0.8
+        metalness 0
+      }
+      geometry Box {
+        size 0.4 3.5 0.02
+      }
+    }
+  ]
+  locked TRUE
+}
+Solid {
+  translation 28.25 4.2 0.015
+  name "stop bar north approach"
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 1 1 1
+        roughness 0.8
+        metalness 0
+      }
+      geometry Box {
+        size 3.5 0.4 0.02
+      }
+    }
+  ]
+  locked TRUE
+}
+Solid {
+  translation 31.75 -4.2 0.015
+  name "stop bar south approach"
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 1 1 1
+        roughness 0.8
+        metalness 0
+      }
+      geometry Box {
+        size 3.5 0.4 0.02
+      }
+    }
+  ]
+  locked TRUE
+}
+
+# --- Speed limit signs ----------------------------------------------------
+# signImage picks the texture; the full set is speed_limit_5 .. _80 in
+# https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/textures/signs/us/.
+
+SpeedLimitSign {
+  translation 2 -4.8 0
+  rotation 0 0 1 3.14159
+  name "speed limit 35 eastbound"
+  signBoards [
+    SpeedLimitPanel {
+      translation 0.023 0 0
+      signImage [
+        "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/textures/signs/us/speed_limit_35.jpg"
+      ]
+    }
+  ]
+}
+SpeedLimitSign {
+  translation 14 -4.8 0
+  rotation 0 0 1 3.14159
+  name "speed limit 25 eastbound"
+  signBoards [
+    SpeedLimitPanel {
+      translation 0.023 0 0
+      signImage [
+        "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/textures/signs/us/speed_limit_25.jpg"
+      ]
+    }
+  ]
+}
+SpeedLimitSign {
+  translation 10 4.8 0
+  name "speed limit 35 westbound"
+  signBoards [
+    SpeedLimitPanel {
+      translation 0.023 0 0
+      signImage [
+        "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/traffic/protos/textures/signs/us/speed_limit_35.jpg"
+      ]
+    }
+  ]
+}
+
+# --- Stop signs, one per approach ----------------------------------------
+# Each faces the traffic it governs: rotate about z so the sign's +x face
+# points back at the oncoming driver.
+
+StopSign {
+  translation 26 -4.8 0
+  rotation 0 0 1 3.14159
+  name "stop sign west approach"
+}
+StopSign {
+  translation 34 4.8 0
+  name "stop sign east approach"
+}
+StopSign {
+  translation 25.2 5 0
+  rotation 0 0 1 1.5708
+  name "stop sign north approach"
+}
+StopSign {
+  translation 34.8 -5 0
+  rotation 0 0 1 -1.5708
+  name "stop sign south approach"
+}
