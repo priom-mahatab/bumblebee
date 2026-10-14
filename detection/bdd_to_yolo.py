@@ -39,5 +39,5 @@ def convert_bdd_to_yolo(input_folder, output_folder, limit):
                 out_file.write('\n'.join(lines))
 
 if __name__ == "__main__":
-    convert_bdd_to_yolo(training_labels_data_folder, training_output_dir, limit=5000)
+    convert_bdd_to_yolo(training_labels_data_folder, training_output_dir, limit=25000)
     convert_bdd_to_yolo(validation_labels_data_folder, val_output_dir, limit=2000)

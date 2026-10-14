@@ -1,8 +1,3 @@
-"""Pure decision logic for the control loop — no hardware calls.
-
-Kept separate from motor_control.py so it can be written and tested
-before any hardware arrives: feed it numbers, get back an Action.
-"""
 from dataclasses import dataclass
 from enum import Enum
 

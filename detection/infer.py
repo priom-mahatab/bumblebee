@@ -1,10 +1,3 @@
-"""Object detection using pretrained YOLOv8n (COCO weights) — no training
-required. COCO already includes person/car/truck/bus/stop sign, which
-covers everything the track needs, so this is the model that actually
-runs on the car. The BDD100K fine-tuning experiment (added later in
-detection/train.py) is a separate, graded ML analysis, not a dependency
-of the live demo — see README for why.
-"""
 from ultralytics import YOLO
 
 from control.state_machine import Detection
@@ -15,7 +8,7 @@ _model = None
 def load_model():
     global _model
     if _model is None:
-        _model = YOLO("yolov8n.pt")  # auto-downloads on first run
+        _model = YOLO("detection/bdd_v3_best.pt")  
     return _model
 
 
