@@ -7,3 +7,4 @@ datasets/
 *.pt
 *.onnx
 *.ncnn*
+sim/assets/          # procedurally generated sign textures (regenerated on run)

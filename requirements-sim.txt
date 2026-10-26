@@ -1,0 +1,6 @@
+# Extra requirements for the 3D simulator (sim/run_sim.py and friends), on top
+# of requirements.txt. Kept separate because Ursina/Panda3D pull in a GL/
+# windowing stack that the lane/detection prototyping doesn't otherwise need.
+#   pip install -r requirements.txt -r requirements-sim.txt
+ursina        # 3D engine (wraps Panda3D); tested with ursina 8.3 / panda3d 1.10
+pillow        # procedural sign textures (sim/textures.py)

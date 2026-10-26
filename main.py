@@ -19,7 +19,7 @@ from pathlib import Path
 
 import cv2
 
-from control.state_machine import decide_action
+from control.state_machine import StopSignController
 from detection.infer import detect
 from vision.camera import VideoSource, WebcamSource
 from vision.lane_detection import compute_lane_offset
@@ -72,6 +72,7 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     writer = None
     frames = 0
+    controller = StopSignController()  # holds stop-sign pause-and-go state across frames
 
     try:
         while True:
@@ -83,7 +84,7 @@ def main():
 
             lane_offset = compute_lane_offset(frame)
             detections = detect(frame)
-            action = decide_action(
+            action = controller.update(
                 lane_offset=lane_offset or 0.0,
                 detections=detections,
                 distance_cm=None,          # no ultrasonic sensor yet
