@@ -31,6 +31,8 @@ LANE_OFFSET_DEADZONE = 0.08  # fraction of half-frame-width
 IN_PATH_X_RANGE = (0.3, 0.7)  # fraction of frame width counted as "ahead"
 STOP_SIGN_CLASSES = {"stop sign"}
 OBSTACLE_CLASSES = {"person", "car", "truck", "bus"}
+OBSTACLE_SLOW_CLOSENESS = 0.22  # lead vehicle bbox this tall (frac of frame height) -> SLOW
+OBSTACLE_STOP_CLOSENESS = 0.45  # lead vehicle very close (fills ~half the frame) -> STOP
 STOP_HOLD_SECONDS = 2.0  # how long to hold at a stop sign before proceeding
 STOP_SIGN_ARM_FRAMES = 3  # consecutive sign frames before a stop is triggered
 STOP_SIGN_CLEAR_FRAMES = 3  # consecutive sign-free frames before the latch resets
@@ -55,10 +57,11 @@ def stop_sign_in_path(detections: list[Detection], frame_width: int = 640) -> bo
 
 
 def decide_action(
-    lane_offset: float,
+    lane_offset: float | None,
     detections: list[Detection],
     distance_cm: float | None,
     frame_width: int = 640,
+    frame_height: int = 480,
 ) -> Action:
     """
     Pure, stateless per-frame decision. A stop sign here only produces STOP
@@ -71,25 +74,42 @@ def decide_action(
     detections: objects seen in the current frame.
     distance_cm: latest ultrasonic reading, or None if unavailable.
     """
+    
     if distance_cm is not None and distance_cm < STOP_DISTANCE_CM:
         return Action.STOP
 
     if stop_sign_in_path(detections, frame_width):
         return Action.STOP
 
-    for det in detections:
-        if det.class_name in OBSTACLE_CLASSES and _in_path(det.bbox, frame_width):
+    # Distance-aware obstacle response (monocular, no ultrasonic on video):
+    # a closer in-path vehicle has a taller bbox. Far cars are ignored.
+    closeness = lead_vehicle_closeness(detections, frame_width, frame_height)
+    if closeness is not None:
+        if closeness >= OBSTACLE_STOP_CLOSENESS:
+            return Action.STOP
+        if closeness >= OBSTACLE_SLOW_CLOSENESS:
             return Action.SLOW
 
     if distance_cm is not None and distance_cm < SLOW_DISTANCE_CM:
         return Action.SLOW
 
+    if lane_offset is None:
+        return Action.SLOW
     if lane_offset > LANE_OFFSET_DEADZONE:
         return Action.TURN_RIGHT
     if lane_offset < -LANE_OFFSET_DEADZONE:
         return Action.TURN_LEFT
     return Action.FORWARD
 
+def lead_vehicle_closeness(detections, frame_width, frame_height):
+    """Height fraction of the closest in-path vehicle, or None if none ahead.
+    Bigger = closer. Used as a monocular distance proxy (no ultrasonic)."""
+    heights = []
+    for det in detections:
+        if det.class_name in OBSTACLE_CLASSES and _in_path(det.bbox, frame_width):
+            x1, y1, x2, y2 = det.bbox
+            heights.append((y2 - y1) / frame_height)
+    return max(heights) if heights else None
 
 class StopSignController:
     """
@@ -114,10 +134,11 @@ class StopSignController:
 
     def update(
         self,
-        lane_offset: float,
+        lane_offset: float | None,
         detections: list[Detection],
         distance_cm: float | None,
         frame_width: int = 640,
+        frame_height: int = 480,
         now: float | None = None,
     ) -> Action:
         if now is None:
@@ -158,7 +179,7 @@ class StopSignController:
         if self.phase is Phase.CLEARING:
             detections = [d for d in detections if d.class_name not in STOP_SIGN_CLASSES]
 
-        return decide_action(lane_offset, detections, distance_cm, frame_width)
+        return decide_action(lane_offset, detections, distance_cm, frame_width, frame_height)
 
 
 if __name__ == "__main__":
@@ -166,6 +187,7 @@ if __name__ == "__main__":
         ("clear road, centered", 0.0, [], None),
         ("lane drifted right", 0.15, [], None),
         ("lane drifted left", -0.2, [], None),
+        ("lane lost", None, [], None),
         ("car ahead, mid distance", 0.0, [Detection("car", 0.9, (280, 100, 360, 300))], 30),
         ("very close object", 0.0, [], 8),
         ("stop sign in path", 0.0, [Detection("stop sign", 0.95, (300, 50, 340, 90))], 100),

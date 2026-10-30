@@ -19,7 +19,7 @@ from pathlib import Path
 
 import cv2
 
-from control.state_machine import StopSignController
+from control.state_machine import StopSignController, lead_vehicle_closeness
 from detection.infer import detect
 from vision.camera import VideoSource, WebcamSource
 from vision.lane_detection import compute_lane_offset
@@ -27,7 +27,7 @@ from vision.lane_detection import compute_lane_offset
 OUT_DIR = "runs/pipeline"
 
 
-def annotate(frame, lane_offset, detections, action):
+def annotate(frame, lane_offset, detections, action, closeness):
     """Draw the pipeline's view on the frame: detection boxes, the lane-center
     marker (reconstructed from the offset) vs. frame center, and a HUD line."""
     h, w = frame.shape[:2]
@@ -49,6 +49,8 @@ def annotate(frame, lane_offset, detections, action):
     off_txt = f"{lane_offset:+.3f}" if lane_offset is not None else "none"
     cv2.putText(frame, f"offset: {off_txt}   action: {action.value}", (10, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+    cv2.putText(frame, f"lead: {closeness:.2f}" if closeness is not None else "lead: none",
+            (10, 64), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
     return frame
 
 
@@ -84,14 +86,16 @@ def main():
 
             lane_offset = compute_lane_offset(frame)
             detections = detect(frame)
+            closeness = lead_vehicle_closeness(detections, frame.shape[1], frame.shape[0])
             action = controller.update(
-                lane_offset=lane_offset or 0.0,
+                lane_offset=lane_offset,
                 detections=detections,
                 distance_cm=None,          # no ultrasonic sensor yet
                 frame_width=frame.shape[1],
+                frame_height=frame.shape[0],
             )
 
-            annotated = annotate(frame, lane_offset, detections, action)
+            annotated = annotate(frame, lane_offset, detections, action, closeness)
             if writer is None:
                 h, w = annotated.shape[:2]
                 writer = cv2.VideoWriter(
