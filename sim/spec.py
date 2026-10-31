@@ -37,7 +37,10 @@ CAM_FORWARD_OFFSET_M = 1.5  # camera sits ahead of the rover's turn centre
 # (forward / slow / stop / turn) and these govern how fast that plays out.
 CRUISE_SPEED_MPS = 8.0      # ASSUMPTION
 SLOW_SPEED_MPS = 3.0
-TURN_YAW_RATE_DPS = 35.0    # deg/sec of heading change on TURN_LEFT/RIGHT
+TURN_YAW_RATE_DPS = 35.0    # deg/sec: the MAX (clamp) heading-change rate
+STEER_GAIN_DPS = 200.0      # P-controller gain: yaw_rate = GAIN * lane_offset,
+                            # clamped to +/-TURN_YAW_RATE_DPS. Higher = sharper
+                            # correction (risk of oscillation); lower = lazier.
 STOP_HOLD_SECONDS = 1.5     # how long to sit at a stop sign before resuming
 
 # --- Road geometry --------------------------------------------------------

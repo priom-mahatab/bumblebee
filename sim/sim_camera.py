@@ -138,5 +138,28 @@ class SimCameraSource:
                 best = d if best is None else min(best, d)
         return best
 
+    def _road_distance_m(self, x: float, z: float) -> float:
+        """Arc length along the centreline of the point nearest to (x, z)."""
+        c = self.course
+        i = min(range(len(c.xs)),
+                key=lambda k: (c.xs[k] - x) ** 2 + (c.zs[k] - z) ** 2)
+        return c.cum[i]
+
+    def next_stop_sign_distance_m(self) -> float | None:
+        """Curve-aware along-road distance from the ego to the next stop sign
+        ahead, or None if none remain. It's measured as arc length (not the
+        straight-line chord) so it stays correct through the course's bends, and
+        the control layer dead-reckons against the same arc-length odometry. The
+        sim can give this exactly because it authored the sign positions; a real
+        car would range the sign off its bounding box instead."""
+        ego_s = self._road_distance_m(self.ego.x, self.ego.z)
+        best = None
+        for o in self.course.objects:
+            if o.class_name == "stop sign":
+                rem = self._road_distance_m(o.x, o.z) - ego_s
+                if rem > 0:
+                    best = rem if best is None else min(best, rem)
+        return best
+
     def step_world(self, dt: float):
         self.world.update(dt)

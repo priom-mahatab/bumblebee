@@ -8,7 +8,7 @@ _model = None
 def load_model():
     global _model
     if _model is None:
-        _model = YOLO("detection/bdd_v3_best.pt")  
+        _model = YOLO("detection/models/bdd_v4_960.pt")  
     return _model
 
 

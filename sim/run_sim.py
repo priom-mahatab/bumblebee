@@ -28,9 +28,21 @@ from vision.lane_detection import compute_lane_offset
 from . import course as course_mod
 from . import spec
 from .sim_camera import SimCameraSource
+from control.state_machine import Detection
 
 GT_CLASSES = ["stop sign", "car", "person", "truck", "bus"]
 DT = 1.0 / spec.SIM_FPS
+
+# Lane-detection ROI tuned to the SIM camera geometry (wider/higher than the
+# real-dashcam default, which misses the sim's lane lines). (x_frac, y_frac).
+SIM_ROI = [(0.0, 0.88), (1.0, 0.88), (0.80, 0.48), (0.20, 0.48)]
+
+
+def gt_to_detections(gt):
+    """Sim ground-truth tuples -> Detection objects for the control layer.
+    Confidence is 1.0: GT is exact, not estimated. This is the perception
+    source that DRIVES control in the sim (YOLO stays an optional overlay)."""
+    return [Detection(name, 1.0, bbox) for name, bbox in gt]
 
 
 def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
@@ -52,6 +64,10 @@ def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     return frame
 
+def gt_to_detections(gt):
+    """Sim ground-truth tuples -> Detection objects for the control layer.
+    Confidence is 1.0: GT is exact, not estimated."""
+    return [Detection(class_name, 1.0, bbox) for class_name, bbox in gt]
 
 class Vehicle:
     """Minimal kinematics: the control Action sets speed and yaw rate."""
@@ -62,8 +78,8 @@ class Vehicle:
         self.stop_timer = 0.0
         self.traveled = 0.0
 
-    def apply(self, action: Action):
-        yaw = 0.0
+    def apply(self, action: Action, lane_offset: float | None = None):
+        # --- speed comes from the discrete action (stop / slow / cruise) ---
         if action == Action.STOP:
             if self.stop_timer <= 0:
                 self.stop_timer = spec.STOP_HOLD_SECONDS
@@ -72,15 +88,20 @@ class Vehicle:
             self.speed = 0.0                           # still serving a stop
         elif action == Action.SLOW:
             self.speed = spec.SLOW_SPEED_MPS
-        elif action == Action.TURN_LEFT:
-            self.speed = spec.CRUISE_SPEED_MPS; yaw = -spec.TURN_YAW_RATE_DPS
-        elif action == Action.TURN_RIGHT:
-            self.speed = spec.CRUISE_SPEED_MPS; yaw = +spec.TURN_YAW_RATE_DPS
-        else:
+        else:                                          # FORWARD / TURN_* all cruise
             self.speed = spec.CRUISE_SPEED_MPS
 
         if self.stop_timer > 0:
             self.stop_timer -= DT
+
+        # --- steering is PROPORTIONAL to the raw lane offset (P-controller) ---
+        # yaw_rate = gain * offset, clamped to the max turn rate. This follows a
+        # curve smoothly instead of the old on/off TURN_LEFT/RIGHT (which under-
+        # steered through the deadzone). None (lane lost) -> hold heading straight.
+        yaw = 0.0
+        if lane_offset is not None and self.speed > 0:
+            yaw = spec.STEER_GAIN_DPS * lane_offset
+            yaw = max(-spec.TURN_YAW_RATE_DPS, min(spec.TURN_YAW_RATE_DPS, yaw))
 
         self.ego.rotation_y += yaw * DT
         dx, dz = course_mod._dir(self.ego.rotation_y)
@@ -130,13 +151,16 @@ def main():
                 break
             h, w = frame.shape[:2]
 
-            lane_offset = compute_lane_offset(frame)
+            lane_offset = compute_lane_offset(frame, roi=SIM_ROI)
             dist = src.nearest_obstacle_distance_cm()
-            detections = detect(frame) if detect else []
-            action = controller.update(lane_offset=lane_offset or 0.0,
-                                       detections=detections, distance_cm=dist, frame_width=w)
-
+            detections = detect(frame) if detect else []   # YOLO: optional overlay only
             gt = src.ground_truth()
+            sim_detections = gt_to_detections(gt)          # GT drives control in the sim
+            action = controller.update(lane_offset=lane_offset,
+                                       detections=sim_detections, distance_cm=dist,
+                                       frame_width=w, frame_height=h,
+                                       odometry_m=veh.traveled,
+                                       stop_sign_distance_m=src.next_stop_sign_distance_m())
             cv2.imwrite(os.path.join(img_dir, f"frame_{idx:05d}.jpg"), frame)
             with open(os.path.join(lbl_dir, f"frame_{idx:05d}.txt"), "w") as lf:
                 for name, (x1, y1, x2, y2) in gt:
@@ -159,7 +183,7 @@ def main():
                 veh.traveled += spec.CRUISE_SPEED_MPS * DT
                 scripted_pose(src.ego, src.course, veh.traveled)
             else:
-                veh.apply(action)
+                veh.apply(action, lane_offset)
             src.step_world(DT)
 
             if idx % 20 == 0:
