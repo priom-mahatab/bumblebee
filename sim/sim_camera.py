@@ -27,7 +27,7 @@ from .world import build_world
 
 
 class SimCameraSource:
-    def __init__(self, headless: bool = False):
+    def __init__(self, headless: bool = False, min_length: float | None = None):
         # PRC settings must be set before the Ursina/ShowBase app is created.
         loadPrcFileData("", f"win-size {spec.CAM_WIDTH} {spec.CAM_HEIGHT}")
         loadPrcFileData("", "window-type offscreen" if headless else "window-type onscreen")
@@ -49,7 +49,7 @@ class SimCameraSource:
         # would re-attach ursina's 130/140 shader and override this.
         Entity.default_shader = mac_unlit_shader
 
-        self.course = course_mod.build_course()
+        self.course = course_mod.build_course(min_length=min_length)
         self.world = build_world(self.course)
         self.ego = self.world.ego
 

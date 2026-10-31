@@ -122,8 +122,15 @@ def main():
     ap.add_argument("--scripted", action="store_true", help="follow the centreline")
     ap.add_argument("--no-detect", action="store_true", help="skip YOLO (lane+control only)")
     ap.add_argument("--frames", type=int, default=900)
+    ap.add_argument("--seconds", type=float, default=None,
+                    help="run for this many sim-seconds; sizes a long road to match")
     ap.add_argument("--out", default="runs/sim")
     args = ap.parse_args()
+
+    # --seconds overrides the frame count and builds a road long enough that the
+    # ego won't reach the end before time's up (1.3x cruise distance + margin).
+    n_frames = int(args.seconds * spec.SIM_FPS) if args.seconds else args.frames
+    min_length = (spec.CRUISE_SPEED_MPS * args.seconds * 1.3 + 60) if args.seconds else None
 
     detect = None
     if not args.no_detect:
@@ -136,7 +143,7 @@ def main():
     with open(os.path.join(out_dir, "classes.txt"), "w") as f:
         f.write("\n".join(GT_CLASSES) + "\n")
 
-    src = SimCameraSource(headless=args.headless)
+    src = SimCameraSource(headless=args.headless, min_length=min_length)
     veh = Vehicle(src.ego)
     controller = StopSignController()  # holds stop-sign pause-and-go state across frames
     writer = None
@@ -144,7 +151,7 @@ def main():
     print(f"course {src.course.length:.0f} m; writing to {out_dir}")
 
     try:
-        for idx in range(args.frames):
+        for idx in range(n_frames):
             frame = src.read()
             if frame is None:
                 print("render returned no frame (GL back-end can't draw here)")

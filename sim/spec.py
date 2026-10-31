@@ -35,12 +35,17 @@ CAM_FORWARD_OFFSET_M = 1.5  # camera sits ahead of the rover's turn centre
 # --- Rover kinematics (road-scale) ----------------------------------------
 # Simple bicycle-ish steering: the control loop sets a target behaviour
 # (forward / slow / stop / turn) and these govern how fast that plays out.
-CRUISE_SPEED_MPS = 8.0      # ASSUMPTION
-SLOW_SPEED_MPS = 3.0
-TURN_YAW_RATE_DPS = 35.0    # deg/sec: the MAX (clamp) heading-change rate
-STEER_GAIN_DPS = 200.0      # P-controller gain: yaw_rate = GAIN * lane_offset,
+CRUISE_SPEED_MPS = 4.0      # ASSUMPTION (scaled down from 8.0 for the road size)
+SLOW_SPEED_MPS = 1.5
+TURN_YAW_RATE_DPS = 17.5    # deg/sec: the MAX (clamp) heading-change rate
+STEER_GAIN_DPS = 100.0      # P-controller gain: yaw_rate = GAIN * lane_offset,
                             # clamped to +/-TURN_YAW_RATE_DPS. Higher = sharper
                             # correction (risk of oscillation); lower = lazier.
+                            # NOTE: steering is per-TIME, so yaw-per-metre is
+                            # GAIN/speed and max curvature is CLAMP/speed. To
+                            # change cruise speed WITHOUT changing the driven
+                            # path, scale CRUISE, SLOW, GAIN and CLAMP together
+                            # (all were halved from 8.0/3.0/200/35).
 STOP_HOLD_SECONDS = 1.5     # how long to sit at a stop sign before resuming
 
 # --- Road geometry --------------------------------------------------------

@@ -29,8 +29,11 @@ class Placed:
     heading_deg: float
     class_name: str | None = None  # detector/GT label, or None if not a target
     value: int | None = None       # speed-limit number
-    speed_mps: float = 0.0         # >0 for moving traffic (along heading)
+    speed_mps: float = 0.0         # >0 for moving traffic (along the road)
     extent: tuple = (0, 0, 0)      # half-extents (hx,hy,hz) for GT boxes
+    road_dist: float = 0.0         # arc-length position along the centreline
+    lateral: float = 0.0           # lane offset from centreline (right +, left -)
+    direction: int = 1             # +1 travels with the road, -1 oncoming
 
 
 # Course shape: (segment_type, *params). Arc angle >0 turns right, <0 left.
@@ -57,31 +60,34 @@ def _right(h_deg: float) -> tuple[float, float]:
     return math.cos(h), -math.sin(h)
 
 
-def _build_centerline():
+def _build_centerline(n_tiles: int = 1):
+    """Build the centreline, repeating the segment pattern `n_tiles` times
+    end-to-end (the accumulators carry over, so tiles join seamlessly)."""
     xs, zs, hdgs, cum = [0.0], [0.0], [0.0], [0.0]
     x, z, h, s = 0.0, 0.0, 0.0, 0.0
-    for seg in _SEGMENTS:
-        if seg[0] == "straight":
-            length = seg[1]
-            n = max(1, round(length / STEP_M))
-            for _ in range(n):
-                dx, dz = _dir(h)
-                x += dx * STEP_M
-                z += dz * STEP_M
-                s += STEP_M
-                xs.append(x); zs.append(z); hdgs.append(h); cum.append(s)
-        else:  # arc
-            _, radius, angle = seg
-            arc_len = abs(math.radians(angle)) * radius
-            n = max(1, round(arc_len / STEP_M))
-            dh = angle / n
-            for _ in range(n):
-                h += dh
-                dx, dz = _dir(h)
-                x += dx * STEP_M
-                z += dz * STEP_M
-                s += STEP_M
-                xs.append(x); zs.append(z); hdgs.append(h); cum.append(s)
+    for _ in range(n_tiles):
+        for seg in _SEGMENTS:
+            if seg[0] == "straight":
+                length = seg[1]
+                n = max(1, round(length / STEP_M))
+                for _ in range(n):
+                    dx, dz = _dir(h)
+                    x += dx * STEP_M
+                    z += dz * STEP_M
+                    s += STEP_M
+                    xs.append(x); zs.append(z); hdgs.append(h); cum.append(s)
+            else:  # arc
+                _, radius, angle = seg
+                arc_len = abs(math.radians(angle)) * radius
+                n = max(1, round(arc_len / STEP_M))
+                dh = angle / n
+                for _ in range(n):
+                    h += dh
+                    dx, dz = _dir(h)
+                    x += dx * STEP_M
+                    z += dz * STEP_M
+                    s += STEP_M
+                    xs.append(x); zs.append(z); hdgs.append(h); cum.append(s)
     return xs, zs, hdgs, cum
 
 
@@ -111,8 +117,17 @@ class Course:
         return x + rx * lateral, z + rz * lateral
 
 
-def build_course() -> Course:
-    xs, zs, hdgs, cum = _build_centerline()
+def build_course(min_length: float | None = None) -> Course:
+    """Build the course centreline and place its signs and traffic.
+
+    min_length: if given, the segment pattern is tiled end-to-end until the road
+    is at least this long, and every sign/car is placed once per tile — so a
+    longer run has road, signs, and traffic the whole way (used by the sim's
+    --seconds option). Default (None) = one tile, the original course.
+    """
+    tile_len = _build_centerline(1)[3][-1]
+    n_tiles = 1 if not min_length else max(1, math.ceil(min_length / tile_len))
+    xs, zs, hdgs, cum = _build_centerline(n_tiles)
     c = Course(xs, zs, hdgs, cum)
 
     road_half = spec.NUM_LANES * spec.LANE_WIDTH_M / 2
@@ -123,31 +138,34 @@ def build_course() -> Course:
         x, z = c.place(dist, sign_lat)
         _, _, h = c.sample(dist)
         # face back toward oncoming traffic (road heading + 180)
-        c.objects.append(Placed(kind, x, z, h + 180, **kw))
+        c.objects.append(Placed(kind, x, z, h + 180,
+                                road_dist=dist, lateral=sign_lat, **kw))
 
-    # --- signs (right side) ---
-    sign(16, "speed_limit", value=35)
-    sign(48, "stop_sign", class_name="stop sign", extent=(0.4, 0.4, 0.05))
-    sign(92, "speed_limit", value=25)
-    sign(past := c.length - 20, "stop_sign", class_name="stop sign",
-         extent=(0.4, 0.4, 0.05))
+    def car(dist, lateral, direction=1, **kw):
+        """A car in-lane at `dist` along the road (direction -1 = oncoming).
+        road_dist/lateral/direction let world.update keep it ON the road."""
+        x, z = c.place(dist, lateral)
+        _, _, h = c.sample(dist)
+        c.objects.append(Placed("car", x, z, h + (0 if direction > 0 else 180),
+                                class_name="car", road_dist=dist, lateral=lateral,
+                                direction=direction, **kw))
 
-    # --- traffic ---
-    # a parked car on the right shoulder (static obstacle, off the path)
-    x, z = c.place(62, shoulder_lat)
-    _, _, h = c.sample(62)
-    c.objects.append(Placed("car", x, z, h, class_name="car",
-                            extent=(0.9, 0.7, 2.2)))
-    # a slower car ahead in the ego lane — ego should SLOW as it closes in
-    x, z = c.place(78, 0.0)
-    _, _, h = c.sample(78)
-    c.objects.append(Placed("car", x, z, h, class_name="car", speed_mps=2.5,
-                            extent=(0.9, 0.7, 2.2)))
-    # oncoming car in the far lane
-    x, z = c.place(110, -spec.LANE_WIDTH_M)
-    _, _, h = c.sample(110)
-    c.objects.append(Placed("car", x, z, h + 180, class_name="car",
-                            speed_mps=4.0, extent=(0.9, 0.7, 2.2)))
+    # Place signs + traffic once per tile so the whole (possibly long) road is
+    # populated; offsets are the original single-tile positions.
+    for k in range(n_tiles):
+        off = k * tile_len
+        sign(off + 16, "speed_limit", value=35)
+        sign(off + 48, "stop_sign", class_name="stop sign", extent=(0.4, 0.4, 0.05))
+        sign(off + 92, "speed_limit", value=25)
+        sign(off + tile_len - 20, "stop_sign", class_name="stop sign",
+             extent=(0.4, 0.4, 0.05))
+        # parked car on the right shoulder (static obstacle, off the path)
+        car(off + 62, shoulder_lat, extent=(0.9, 0.7, 2.2))
+        # a slower car ahead in the ego lane — ego should SLOW as it closes in
+        car(off + 78, 0.0, speed_mps=2.5, extent=(0.9, 0.7, 2.2))
+        # oncoming car in the far lane
+        car(off + 110, -spec.LANE_WIDTH_M, direction=-1, speed_mps=4.0,
+            extent=(0.9, 0.7, 2.2))
     return c
 
 

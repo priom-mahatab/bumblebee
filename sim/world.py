@@ -123,12 +123,19 @@ class World:
     ego: Entity
     labels: list
     _moving: list  # (holder_entity, Placed)
+    course: course_mod.Course
 
     def update(self, dt: float):
+        # Advance each moving car ALONG the road (not in a straight line) so it
+        # keeps its lane through curves: integrate its arc-length position, then
+        # read the road point + heading back off the centreline. Wrapping keeps
+        # it circulating on a long road; direction -1 travels against the course.
         for holder, p in self._moving:
-            dx, dz = course_mod._dir(holder.rotation_y)
-            holder.x += dx * p.speed_mps * dt
-            holder.z += dz * p.speed_mps * dt
+            p.road_dist = (p.road_dist + p.direction * p.speed_mps * dt) % self.course.length
+            x, z = self.course.place(p.road_dist, p.lateral)
+            _, _, h = self.course.sample(p.road_dist)
+            holder.x, holder.z = x, z
+            holder.rotation_y = h + (0 if p.direction > 0 else 180)
 
 
 def build_world(c: course_mod.Course) -> World:
@@ -165,4 +172,4 @@ def build_world(c: course_mod.Course) -> World:
 
     ex, ez, eh = course_mod.ego_start(c)
     ego = Entity(position=(ex, 0, ez), rotation_y=eh)
-    return World(ego=ego, labels=labels, _moving=moving)
+    return World(ego=ego, labels=labels, _moving=moving, course=c)
