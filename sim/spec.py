@@ -47,6 +47,10 @@ STEER_GAIN_DPS = 100.0      # P-controller gain: yaw_rate = GAIN * lane_offset,
                             # path, scale CRUISE, SLOW, GAIN and CLAMP together
                             # (all were halved from 8.0/3.0/200/35).
 STOP_HOLD_SECONDS = 1.5     # how long to sit at a stop sign before resuming
+# Map a recognized speed limit (mph) to a sim cruise speed. The sim's speeds are
+# road-scale stand-ins, so we scale so the 35 sign == the base cruise and lower
+# limits are proportionally slower (25 -> ~2.9 m/s). Tunable.
+SPEED_LIMIT_MPS_PER_MPH = CRUISE_SPEED_MPS / 35.0
 
 # --- Road geometry --------------------------------------------------------
 LANE_WIDTH_M = 3.5          # matches track.wbt

@@ -22,15 +22,16 @@ from datetime import datetime
 
 import cv2
 
-from control.state_machine import Action, StopSignController
+from control.state_machine import Action, StopSignController, SpeedLimitTracker
 from vision.lane_detection import compute_lane_offset
+from vision.speed_limit import read_speed_limit
 
 from . import course as course_mod
 from . import spec
 from .sim_camera import SimCameraSource
 from control.state_machine import Detection
 
-GT_CLASSES = ["stop sign", "car", "person", "truck", "bus"]
+GT_CLASSES = ["stop sign", "car", "person", "truck", "bus", "speed limit"]
 DT = 1.0 / spec.SIM_FPS
 
 # Lane-detection ROI tuned to the SIM camera geometry (wider/higher than the
@@ -45,7 +46,7 @@ def gt_to_detections(gt):
     return [Detection(name, 1.0, bbox) for name, bbox in gt]
 
 
-def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
+def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx, speed_limit=None):
     h, w = frame.shape[:2]
     cv2.line(frame, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
     if lane_offset is not None:
@@ -60,7 +61,8 @@ def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     off_txt = f"{lane_offset:+.3f}" if lane_offset is not None else "none"
     dist_txt = f"{dist:.0f}cm" if dist is not None else "--"
-    cv2.putText(frame, f"[{idx}] off {off_txt}  dist {dist_txt}  {action.value}",
+    lim_txt = f"{speed_limit}" if speed_limit is not None else "--"
+    cv2.putText(frame, f"[{idx}] off {off_txt}  dist {dist_txt}  lim {lim_txt}  {action.value}",
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     return frame
 
@@ -78,7 +80,12 @@ class Vehicle:
         self.stop_timer = 0.0
         self.traveled = 0.0
 
-    def apply(self, action: Action, lane_offset: float | None = None):
+    def apply(self, action: Action, lane_offset: float | None = None,
+              speed_limit: int | None = None):
+        # Cruise speed obeys the recognized speed limit when we have one, else the
+        # default. (Mapping lives in spec; speed_limit is the READ number in mph.)
+        cruise = (spec.CRUISE_SPEED_MPS if speed_limit is None
+                  else speed_limit * spec.SPEED_LIMIT_MPS_PER_MPH)
         # --- speed comes from the discrete action (stop / slow / cruise) ---
         if action == Action.STOP:
             if self.stop_timer <= 0:
@@ -89,7 +96,7 @@ class Vehicle:
         elif action == Action.SLOW:
             self.speed = spec.SLOW_SPEED_MPS
         else:                                          # FORWARD / TURN_* all cruise
-            self.speed = spec.CRUISE_SPEED_MPS
+            self.speed = cruise
 
         if self.stop_timer > 0:
             self.stop_timer -= DT
@@ -146,6 +153,7 @@ def main():
     src = SimCameraSource(headless=args.headless, min_length=min_length)
     veh = Vehicle(src.ego)
     controller = StopSignController()  # holds stop-sign pause-and-go state across frames
+    speed_tracker = SpeedLimitTracker()  # holds the active speed limit across frames
     writer = None
     meta = open(os.path.join(out_dir, "meta.jsonl"), "w")
     print(f"course {src.course.length:.0f} m; writing to {out_dir}")
@@ -163,6 +171,12 @@ def main():
             detections = detect(frame) if detect else []   # YOLO: optional overlay only
             gt = src.ground_truth()
             sim_detections = gt_to_detections(gt)          # GT drives control in the sim
+            # Read the speed limit off the nearest sign's PIXELS (classical CV), not
+            # from GT; the tracker's vote keeps a misread from jerking the speed.
+            sl_boxes = [bb for name, bb in gt if name == "speed limit"]
+            reading = (read_speed_limit(frame, max(sl_boxes, key=lambda b: b[3] - b[1]))
+                       if sl_boxes else None)
+            speed_limit = speed_tracker.update(reading)
             action = controller.update(lane_offset=lane_offset,
                                        detections=sim_detections, distance_cm=dist,
                                        frame_width=w, frame_height=h,
@@ -177,9 +191,11 @@ def main():
                     lf.write(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
             meta.write(json.dumps({"frame": idx, "offset": lane_offset,
                                    "dist_cm": dist, "action": action.value,
+                                   "speed_limit": speed_limit, "sl_read": reading,
                                    "n_det": len(detections), "n_gt": len(gt)}) + "\n")
 
-            annotated = annotate(frame, lane_offset, detections, gt, action, dist, idx)
+            annotated = annotate(frame, lane_offset, detections, gt, action, dist, idx,
+                                 speed_limit=speed_limit)
             if writer is None:
                 writer = cv2.VideoWriter(os.path.join(out_dir, "annotated.mp4"),
                                          cv2.VideoWriter_fourcc(*"mp4v"),
@@ -190,7 +206,7 @@ def main():
                 veh.traveled += spec.CRUISE_SPEED_MPS * DT
                 scripted_pose(src.ego, src.course, veh.traveled)
             else:
-                veh.apply(action, lane_offset)
+                veh.apply(action, lane_offset, speed_limit=speed_limit)
             src.step_world(DT)
 
             if idx % 20 == 0:

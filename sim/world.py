@@ -160,7 +160,7 @@ def build_world(c: course_mod.Course) -> World:
     for p in c.objects:
         if p.kind in ("stop_sign", "speed_limit"):
             panel = _build_sign(p)
-            if p.class_name:  # stop signs are targets; speed limits are not
+            if p.class_name:  # GT targets (stop + speed-limit signs); None = not labelled
                 labels.append(LabeledObject(panel, p.class_name, p.extent))
         elif p.kind == "car":
             holder = Entity(position=(p.x, 0.6, p.z), rotation_y=p.heading_deg)

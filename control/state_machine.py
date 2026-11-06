@@ -38,6 +38,7 @@ STOP_LINE_MARGIN_M = 1.0  # stop this far BEFORE the stop sign's along-road posi
 STOP_HOLD_SECONDS = 2.0  # how long to hold at a stop sign before proceeding
 STOP_SIGN_ARM_FRAMES = 3  # consecutive sign frames before an approach is armed
 STOP_SIGN_CLEAR_FRAMES = 3  # consecutive sign-free frames before the latch resets
+SPEED_LIMIT_VOTE_FRAMES = 3  # consecutive agreeing OCR reads before a new limit sticks
 
 
 def _bbox_center_x_fraction(bbox: tuple[float, float, float, float], frame_width: int) -> float:
@@ -200,6 +201,34 @@ class StopSignController:
         # Every other phase: lanes/obstacles/ultrasonic drive us. Stop signs
         # never stop us through decide_action — the phase logic above owns that.
         return decide_action(lane_offset, detections, distance_cm, frame_width, frame_height)
+
+
+class SpeedLimitTracker:
+    """Holds the active speed limit, committing a newly-read one only after it's
+    been recognized on SPEED_LIMIT_VOTE_FRAMES consecutive frames.
+
+    Per-frame OCR is noisy, so a single misread shouldn't jerk the cruise speed.
+    `current_limit` is the last committed value (mph), or None until the first
+    confident reading; it persists after the sign leaves view (a limit stays in
+    force until the next sign changes it), exactly like real driving.
+    """
+
+    def __init__(self) -> None:
+        self.current_limit: int | None = None
+        self._candidate: int | None = None
+        self._streak = 0
+
+    def update(self, reading: int | None) -> int | None:
+        """Feed this frame's OCR reading (or None if no/failed read). Returns the
+        currently-in-force limit."""
+        if reading is not None and reading == self._candidate:
+            self._streak += 1
+        else:
+            self._candidate = reading
+            self._streak = 1 if reading is not None else 0
+        if self._streak >= SPEED_LIMIT_VOTE_FRAMES and self._candidate is not None:
+            self.current_limit = self._candidate
+        return self.current_limit
 
 
 if __name__ == "__main__":
