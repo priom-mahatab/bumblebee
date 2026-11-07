@@ -9,6 +9,8 @@ class Action(Enum):
     STOP = "stop"
     TURN_LEFT = "turn_left"
     TURN_RIGHT = "turn_right"
+    CHANGE_LEFT = "change_left"    # cross into the adjacent left lane (sharper, sustained than TURN_LEFT)
+    CHANGE_RIGHT = "change_right"  # cross into the adjacent right lane
 
 
 class Phase(Enum):
@@ -16,6 +18,12 @@ class Phase(Enum):
     APPROACHING = "approaching"  # sign ranged; rolling forward to the latched stop point
     STOPPED = "stopped"          # holding at the sign for STOP_HOLD_SECONDS
     CLEARING = "clearing"        # stop served; drive through, ignore THIS sign
+
+
+class LaneChangePhase(Enum):
+    IN_LANE = "in_lane"      # tracking the current lane; watching for an obstacle to trigger a change
+    CHANGING = "changing"    # committed lateral maneuver, dead-reckoned on odometry
+    SETTLING = "settling"    # re-centering in the new lane; a fresh change is suppressed here
 
 
 @dataclass
@@ -40,15 +48,47 @@ STOP_SIGN_ARM_FRAMES = 3  # consecutive sign frames before an approach is armed
 STOP_SIGN_CLEAR_FRAMES = 3  # consecutive sign-free frames before the latch resets
 SPEED_LIMIT_VOTE_FRAMES = 3  # consecutive agreeing OCR reads before a new limit sticks
 
+# --- Lane-change (obstacle-avoidance) thresholds. Tune on the real track. ---
+LANE_CHANGE_TRIGGER_CLOSENESS = 0.30  # in-path lead this close -> prefer a lane change over stopping (above SLOW, below STOP)
+LANE_CHANGE_ARM_FRAMES = 3            # consecutive trigger frames before a change commits (debounce)
+LANE_CHANGE_DISTANCE_M = 1.0          # odometry length of the committed lateral maneuver (dead-reckoned)
+LANE_SETTLE_DISTANCE_M = 0.5          # distance after the maneuver before a new change can arm (anti ping-pong)
+TARGET_LANE_BLOCKED_CLOSENESS = 0.15  # a vehicle at least this tall in the target lane's band -> lane not clear
+PREFERRED_SIDE = "left"               # which way to go when both adjacent lanes are open and clear
+LEFT_LANE_X_RANGE = (0.0, 0.4)        # frame-width band treated as the left lane, for the target-clear check
+RIGHT_LANE_X_RANGE = (0.6, 1.0)       # frame-width band treated as the right lane
+
 
 def _bbox_center_x_fraction(bbox: tuple[float, float, float, float], frame_width: int) -> float:
     x1, _, x2, _ = bbox
     return ((x1 + x2) / 2) / frame_width
 
 
-def _in_path(bbox: tuple[float, float, float, float], frame_width: int) -> bool:
-    low, high = IN_PATH_X_RANGE
+def _in_band(bbox: tuple[float, float, float, float], frame_width: int,
+             band: tuple[float, float]) -> bool:
+    """True if the bbox center falls in the given lateral band (fractions of
+    frame width). Generalizes _in_path so the same check works for the lane
+    straight ahead AND for an adjacent target lane."""
+    low, high = band
     return low < _bbox_center_x_fraction(bbox, frame_width) < high
+
+
+def _in_path(bbox: tuple[float, float, float, float], frame_width: int) -> bool:
+    return _in_band(bbox, frame_width, IN_PATH_X_RANGE)
+
+
+def _obstacle_in_band(detections: list[Detection], frame_width: int, frame_height: int,
+                      band: tuple[float, float],
+                      min_closeness: float = TARGET_LANE_BLOCKED_CLOSENESS) -> bool:
+    """True if a vehicle sits in the given lateral band and is close enough
+    (bbox height fraction >= min_closeness) to make that lane unsafe to enter.
+    A tiny, far car in the target lane does not block it."""
+    for det in detections:
+        if det.class_name in OBSTACLE_CLASSES and _in_band(det.bbox, frame_width, band):
+            x1, y1, x2, y2 = det.bbox
+            if (y2 - y1) / frame_height >= min_closeness:
+                return True
+    return False
 
 
 def stop_sign_visible(detections: list[Detection]) -> bool:
@@ -141,18 +181,20 @@ class StopSignController:
         self.sign_streak = 0  # consecutive frames a sign is visible
         self.no_sign_streak = 0  # consecutive frames without one
 
-    def update(
+    def advance(
         self,
-        lane_offset: float | None,
         detections: list[Detection],
-        distance_cm: float | None,
-        frame_width: int = 640,
-        frame_height: int = 480,
         odometry_m: float = 0.0,
         stop_sign_distance_m: float | None = None,
         now: float | None = None,
-    ) -> Action:
-        """Range-and-dead-reckon stop-sign handling wrapped around decide_action.
+    ) -> Action | None:
+        """Step the stop-sign phase machine one frame. Returns Action.STOP while
+        holding at the sign, else None (no stop-sign override this frame).
+
+        This is PURE stop-sign phase logic — no lane-keeping. The coordinator
+        (DrivingController) calls this directly and supplies the base action when
+        it returns None; the legacy update() below wraps it around decide_action
+        so existing callers (main.py, the sim) keep their old behavior.
 
         odometry_m: how far the car has driven along its path, as arc length.
         stop_sign_distance_m: curve-aware along-road distance to the next stop
@@ -194,12 +236,209 @@ class StopSignController:
                 self.phase = Phase.CRUISING
                 self.stop_target_m = None
 
-        # Forced STOP only while serving the hold.
+        # Forced STOP only while serving the hold; every other phase defers to
+        # the caller's base logic (the stop-sign phase never stops us any other
+        # way — it owns that decision here).
         if self.phase is Phase.STOPPED:
             return Action.STOP
+        return None
 
-        # Every other phase: lanes/obstacles/ultrasonic drive us. Stop signs
-        # never stop us through decide_action — the phase logic above owns that.
+    def update(
+        self,
+        lane_offset: float | None,
+        detections: list[Detection],
+        distance_cm: float | None,
+        frame_width: int = 640,
+        frame_height: int = 480,
+        odometry_m: float = 0.0,
+        stop_sign_distance_m: float | None = None,
+        now: float | None = None,
+    ) -> Action:
+        """Backward-compatible wrapper: advance the stop-sign phase, and if it
+        isn't forcing a hold, fall through to the stateless decide_action base.
+        Unchanged signature/behavior so main.py and the sim keep working; new
+        code should prefer DrivingController, which also layers lane changing."""
+        override = self.advance(detections, odometry_m, stop_sign_distance_m, now)
+        if override is not None:
+            return override
+        return decide_action(lane_offset, detections, distance_cm, frame_width, frame_height)
+
+
+class LaneChangeController:
+    """Obstacle-triggered lane change, layered on as a committed, dead-reckoned
+    maneuver — the same latch-and-dead-reckon idea as StopSignController, applied
+    to a lateral move instead of a stop.
+
+      IN_LANE  : watch for a close in-path obstacle. When one is confidently seen
+                 (debounced over LANE_CHANGE_ARM_FRAMES) AND an adjacent lane
+                 exists and is clear, commit a change toward it.
+      CHANGING : steer that way open-loop for LANE_CHANGE_DISTANCE_M of odometry.
+                 The detector's left/right split is meaningless mid-cross, so we
+                 dead-reckon the maneuver rather than vision-track it, and we do
+                 NOT re-decide on the obstacle — we're going around it.
+      SETTLING : hand steering back to lane-keeping so the car re-centers in the
+                 new lane, but suppress a fresh trigger for LANE_SETTLE_DISTANCE_M
+                 so it can't ping-pong. Then back to IN_LANE.
+
+    update() returns an overriding Action (CHANGE_LEFT/RIGHT) only while
+    committing or maneuvering; None means 'no lane-change override this frame'
+    and the caller's base logic (lane-keeping, obstacle SLOW/STOP) applies — so
+    with no valid lane to take, the car simply falls back to slowing/stopping.
+    Adjacency (left/right_lane_exists) and target-lane-clear arrive as perception
+    INPUTS, exactly as the stop-sign controller takes stop_sign_distance_m, so
+    this stays pure, testable decision logic. All cross-frame memory lives here.
+    The maneuver is odometry-based, so an emergency STOP upstream freezes odometry
+    and naturally pauses it until the car moves again.
+    """
+
+    def __init__(
+        self,
+        *,
+        trigger_closeness: float = LANE_CHANGE_TRIGGER_CLOSENESS,
+        arm_frames: int = LANE_CHANGE_ARM_FRAMES,
+        change_distance_m: float = LANE_CHANGE_DISTANCE_M,
+        settle_distance_m: float = LANE_SETTLE_DISTANCE_M,
+        blocked_closeness: float = TARGET_LANE_BLOCKED_CLOSENESS,
+        preferred_side: str = PREFERRED_SIDE,
+        left_lane_band: tuple[float, float] = LEFT_LANE_X_RANGE,
+        right_lane_band: tuple[float, float] = RIGHT_LANE_X_RANGE,
+    ) -> None:
+        # Tunables default to the module constants (small-rover scale); the sim
+        # passes road-scale values (longer maneuver, prefer right). See run_sim.py.
+        self.trigger_closeness = trigger_closeness
+        self.arm_frames = arm_frames
+        self.change_distance_m = change_distance_m
+        self.settle_distance_m = settle_distance_m
+        self.blocked_closeness = blocked_closeness
+        self.preferred_side = preferred_side
+        self.left_lane_band = left_lane_band
+        self.right_lane_band = right_lane_band
+
+        self.phase = LaneChangePhase.IN_LANE
+        self.direction: str | None = None        # 'left' / 'right' while a change is live
+        self.maneuver_start_m: float | None = None  # odometry at which the current phase began
+        self.arm_streak = 0                      # consecutive frames the trigger has held
+
+    def _choose_side(
+        self,
+        detections: list[Detection],
+        frame_width: int,
+        frame_height: int,
+        left_lane_exists: bool,
+        right_lane_exists: bool,
+    ) -> str | None:
+        """Pick a side that both exists and is clear, or None if neither works."""
+        left_ok = left_lane_exists and not _obstacle_in_band(
+            detections, frame_width, frame_height, self.left_lane_band, self.blocked_closeness)
+        right_ok = right_lane_exists and not _obstacle_in_band(
+            detections, frame_width, frame_height, self.right_lane_band, self.blocked_closeness)
+        if left_ok and right_ok:
+            return self.preferred_side
+        if left_ok:
+            return "left"
+        if right_ok:
+            return "right"
+        return None
+
+    def update(
+        self,
+        detections: list[Detection],
+        frame_width: int,
+        frame_height: int,
+        odometry_m: float,
+        left_lane_exists: bool,
+        right_lane_exists: bool,
+    ) -> Action | None:
+        if self.phase is LaneChangePhase.IN_LANE:
+            closeness = lead_vehicle_closeness(detections, frame_width, frame_height)
+            if closeness is not None and closeness >= self.trigger_closeness:
+                self.arm_streak += 1
+            else:
+                self.arm_streak = 0
+            if self.arm_streak >= self.arm_frames:
+                side = self._choose_side(detections, frame_width, frame_height,
+                                         left_lane_exists, right_lane_exists)
+                if side is not None:
+                    self.direction = side
+                    self.maneuver_start_m = odometry_m
+                    self.phase = LaneChangePhase.CHANGING
+                    self.arm_streak = 0
+                    return Action.CHANGE_LEFT if side == "left" else Action.CHANGE_RIGHT
+            return None  # no valid change -> caller's base logic slows/stops instead
+
+        if self.phase is LaneChangePhase.CHANGING:
+            if odometry_m - self.maneuver_start_m >= self.change_distance_m:
+                self.phase = LaneChangePhase.SETTLING
+                self.maneuver_start_m = odometry_m
+                return None  # maneuver done; let lane-keeping re-center this frame
+            return Action.CHANGE_LEFT if self.direction == "left" else Action.CHANGE_RIGHT
+
+        # SETTLING: lane-keeping steers (return None), but no new change may arm
+        # until we've travelled the settle distance.
+        if odometry_m - self.maneuver_start_m >= self.settle_distance_m:
+            self.phase = LaneChangePhase.IN_LANE
+            self.direction = None
+            self.maneuver_start_m = None
+        return None
+
+
+class DrivingController:
+    """Top-level coordinator. Composes the stop-sign and lane-change phase
+    machines over the stateless decide_action base with ONE explicit priority
+    ladder, so the stateful controllers can't fight over the output:
+
+        emergency ultrasonic STOP  >  stop-sign hold  >  lane-change maneuver
+        >  lane-keeping / obstacle SLOW-STOP (decide_action)
+
+    Each stateful layer returns an overriding Action or None; the first override
+    wins, otherwise decide_action drives. This replaces NESTING the controllers,
+    which gets ambiguous once more than one can force an action.
+
+    main.py and the sim still drive StopSignController directly; they move onto
+    this once lane detection reports adjacency (left_lane_exists /
+    right_lane_exists). Until then those inputs default False and the lane-change
+    layer is inert, so adopting DrivingController never regresses current behavior.
+    """
+
+    def __init__(self, lane_change: "LaneChangeController | None" = None) -> None:
+        self.stop_sign = StopSignController()
+        self.lane_change = lane_change if lane_change is not None else LaneChangeController()
+
+    def update(
+        self,
+        lane_offset: float | None,
+        detections: list[Detection],
+        distance_cm: float | None,
+        frame_width: int = 640,
+        frame_height: int = 480,
+        odometry_m: float = 0.0,
+        stop_sign_distance_m: float | None = None,
+        left_lane_exists: bool = False,
+        right_lane_exists: bool = False,
+        now: float | None = None,
+    ) -> Action:
+        if now is None:
+            now = time.monotonic()
+
+        # 1. Emergency ultrasonic stop — wins over everything, including an
+        #    in-progress maneuver. Odometry then stops advancing, so a maneuver
+        #    simply pauses and resumes once the car is moving again.
+        if distance_cm is not None and distance_cm < STOP_DISTANCE_CM:
+            return Action.STOP
+
+        # 2. Stop-sign hold.
+        stop_override = self.stop_sign.advance(detections, odometry_m, stop_sign_distance_m, now)
+        if stop_override is not None:
+            return stop_override
+
+        # 3. Lane-change trigger / maneuver.
+        lane_override = self.lane_change.update(
+            detections, frame_width, frame_height, odometry_m,
+            left_lane_exists, right_lane_exists)
+        if lane_override is not None:
+            return lane_override
+
+        # 4. Base: lane-keeping + obstacle SLOW/STOP + ultrasonic SLOW.
         return decide_action(lane_offset, detections, distance_cm, frame_width, frame_height)
 
 
@@ -264,3 +503,30 @@ if __name__ == "__main__":
         action = controller.update(offset, dets, dist, odometry_m=odom,
                                    stop_sign_distance_m=ssd, now=clock)
         print(f"{label:38s} -> {action.value:8s} [{controller.phase.value}]")
+
+    def lead(h):  # a car dead ahead, h px tall -> closeness h/480 of the frame
+        return [Detection("car", 0.9, (280, 240 - h // 2, 360, 240 + h // 2))]
+
+    print("\nDrivingController obstacle-triggered lane change (left lane open, right absent):")
+    drive = DrivingController()
+    #  label, lane_offset, detections, odometry_m, clock
+    lane_timeline = [
+        ("odom 0.0  lead closing, arm 1",      0.0, lead(160), 0.0, 0.0),
+        ("odom 0.2  arm 2",                    0.0, lead(160), 0.2, 0.1),
+        ("odom 0.4  arm 3 -> commit left",     0.0, lead(160), 0.4, 0.2),
+        ("odom 0.9  changing",                 0.0, lead(160), 0.9, 0.3),
+        ("odom 1.5  maneuver done -> settle",  0.0, [],        1.5, 0.4),
+        ("odom 1.8  settling",                 0.0, [],        1.8, 0.5),
+        ("odom 2.2  settled -> in lane",       0.0, [],        2.2, 0.6),
+    ]
+    for label, offset, dets, odom, clock in lane_timeline:
+        action = drive.update(offset, dets, None, odometry_m=odom,
+                              left_lane_exists=True, right_lane_exists=False, now=clock)
+        print(f"{label:38s} -> {action.value:11s} [{drive.lane_change.phase.value}]")
+
+    print("\nDrivingController obstacle, no adjacent lane -> falls back to STOP:")
+    drive2 = DrivingController()
+    for label, h, odom in [("lead mid", 120, 0.0), ("lead closer", 160, 0.2), ("lead very close", 230, 0.4)]:
+        action = drive2.update(0.0, lead(h), None, odometry_m=odom,
+                               left_lane_exists=False, right_lane_exists=False, now=0.0)
+        print(f"{label:38s} -> {action.value}")

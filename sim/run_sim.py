@@ -17,14 +17,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from datetime import datetime
 
 import cv2
 
-from control.state_machine import Action, StopSignController, SpeedLimitTracker
-from vision.lane_detection import compute_lane_offset
-from vision.speed_limit import read_speed_limit
+from control.state_machine import (Action, DrivingController, LaneChangeController,
+                                    lead_vehicle_closeness)
+from vision.lane_detection import analyze_lanes
 
 from . import course as course_mod
 from . import spec
@@ -46,7 +47,7 @@ def gt_to_detections(gt):
     return [Detection(name, 1.0, bbox) for name, bbox in gt]
 
 
-def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx, speed_limit=None):
+def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
     h, w = frame.shape[:2]
     cv2.line(frame, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
     if lane_offset is not None:
@@ -61,8 +62,7 @@ def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx, speed_
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     off_txt = f"{lane_offset:+.3f}" if lane_offset is not None else "none"
     dist_txt = f"{dist:.0f}cm" if dist is not None else "--"
-    lim_txt = f"{speed_limit}" if speed_limit is not None else "--"
-    cv2.putText(frame, f"[{idx}] off {off_txt}  dist {dist_txt}  lim {lim_txt}  {action.value}",
+    cv2.putText(frame, f"[{idx}] off {off_txt}  dist {dist_txt}  {action.value}",
                 (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
     return frame
 
@@ -71,21 +71,46 @@ def gt_to_detections(gt):
     Confidence is 1.0: GT is exact, not estimated."""
     return [Detection(class_name, 1.0, bbox) for class_name, bbox in gt]
 
-class Vehicle:
-    """Minimal kinematics: the control Action sets speed and yaw rate."""
+def _ego_lane_center() -> float:
+    """Road-frame lateral (m, right +) of the ego's starting lane centre."""
+    return (spec.EGO_LANE_INDEX - (spec.NUM_LANES - 1) / 2) * spec.LANE_WIDTH_M
 
-    def __init__(self, ego):
+
+def _clamp_lane(lateral: float) -> float:
+    """Clamp a lane-centre lateral to the outermost lanes (a safety net; the
+    controller shouldn't ask to change into a lane that isn't there)."""
+    half = (spec.NUM_LANES - 1) / 2 * spec.LANE_WIDTH_M
+    return max(-half, min(half, lateral))
+
+
+class Vehicle:
+    """Minimal kinematics: the control Action sets speed and steering.
+
+    Normal driving steers by a P-controller on the vision lane offset. A
+    CHANGE_LEFT/RIGHT action switches to a pure-pursuit lateral move — aim at a
+    point one lane over and steer toward it for the committed maneuver — then
+    hands back to vision lane-keeping, which re-centres in the new lane."""
+
+    def __init__(self, ego, course):
         self.ego = ego
+        self.course = course
         self.speed = spec.CRUISE_SPEED_MPS
         self.stop_timer = 0.0
         self.traveled = 0.0
+        self.lane_lateral = _ego_lane_center()  # target lane centre (road-frame lateral)
+        self.changing = False                   # inside a committed lane change
 
-    def apply(self, action: Action, lane_offset: float | None = None,
-              speed_limit: int | None = None):
-        # Cruise speed obeys the recognized speed limit when we have one, else the
-        # default. (Mapping lives in spec; speed_limit is the READ number in mph.)
-        cruise = (spec.CRUISE_SPEED_MPS if speed_limit is None
-                  else speed_limit * spec.SPEED_LIMIT_MPS_PER_MPH)
+    def _steer_to_lane(self, target_lateral: float):
+        """Pure pursuit: aim at a look-ahead point in the target lane and turn
+        the heading toward it (clamped). Auto-straightens once aligned."""
+        tx, tz = self.course.place(self.traveled + spec.LANE_CHANGE_LOOKAHEAD_M, target_lateral)
+        desired = math.degrees(math.atan2(tx - self.ego.x, tz - self.ego.z))
+        err = (desired - self.ego.rotation_y + 180) % 360 - 180
+        step = spec.LANE_CHANGE_YAW_RATE_DPS * DT
+        self.ego.rotation_y += max(-step, min(step, err))
+
+    def apply(self, action: Action, lane_offset: float | None = None):
+        cruise = spec.CRUISE_SPEED_MPS
         # --- speed comes from the discrete action (stop / slow / cruise) ---
         if action == Action.STOP:
             if self.stop_timer <= 0:
@@ -95,22 +120,30 @@ class Vehicle:
             self.speed = 0.0                           # still serving a stop
         elif action == Action.SLOW:
             self.speed = spec.SLOW_SPEED_MPS
-        else:                                          # FORWARD / TURN_* all cruise
+        else:                                          # FORWARD / TURN_* / CHANGE_* cruise
             self.speed = cruise
 
         if self.stop_timer > 0:
             self.stop_timer -= DT
 
-        # --- steering is PROPORTIONAL to the raw lane offset (P-controller) ---
-        # yaw_rate = gain * offset, clamped to the max turn rate. This follows a
-        # curve smoothly instead of the old on/off TURN_LEFT/RIGHT (which under-
-        # steered through the deadzone). None (lane lost) -> hold heading straight.
-        yaw = 0.0
-        if lane_offset is not None and self.speed > 0:
-            yaw = spec.STEER_GAIN_DPS * lane_offset
-            yaw = max(-spec.TURN_YAW_RATE_DPS, min(spec.TURN_YAW_RATE_DPS, yaw))
+        # --- steering ---
+        if action in (Action.CHANGE_LEFT, Action.CHANGE_RIGHT):
+            if not self.changing:                      # rising edge: latch the target lane once
+                self.changing = True
+                shift = -spec.LANE_WIDTH_M if action == Action.CHANGE_LEFT else spec.LANE_WIDTH_M
+                self.lane_lateral = _clamp_lane(self.lane_lateral + shift)
+            if self.speed > 0:
+                self._steer_to_lane(self.lane_lateral)
+        else:
+            self.changing = False
+            # vision lane-keeping: yaw_rate = gain * offset, clamped. None (lane
+            # lost) -> hold heading straight.
+            yaw = 0.0
+            if lane_offset is not None and self.speed > 0:
+                yaw = spec.STEER_GAIN_DPS * lane_offset
+                yaw = max(-spec.TURN_YAW_RATE_DPS, min(spec.TURN_YAW_RATE_DPS, yaw))
+            self.ego.rotation_y += yaw * DT
 
-        self.ego.rotation_y += yaw * DT
         dx, dz = course_mod._dir(self.ego.rotation_y)
         self.ego.x += dx * self.speed * DT
         self.ego.z += dz * self.speed * DT
@@ -151,9 +184,16 @@ def main():
         f.write("\n".join(GT_CLASSES) + "\n")
 
     src = SimCameraSource(headless=args.headless, min_length=min_length)
-    veh = Vehicle(src.ego)
-    controller = StopSignController()  # holds stop-sign pause-and-go state across frames
-    speed_tracker = SpeedLimitTracker()  # holds the active speed limit across frames
+    veh = Vehicle(src.ego, src.course)
+    # Full coordinator: emergency-stop > stop-sign > lane-change > lane-keeping.
+    # Lane-change tunables are road-scale (sim), overriding the rover defaults.
+    controller = DrivingController(LaneChangeController(
+        trigger_closeness=spec.LANE_CHANGE_TRIGGER_CLOSENESS,
+        change_distance_m=spec.LANE_CHANGE_DISTANCE_M,
+        settle_distance_m=spec.LANE_SETTLE_DISTANCE_M,
+        blocked_closeness=spec.TARGET_LANE_BLOCKED_CLOSENESS,
+        preferred_side=spec.PREFERRED_SIDE,
+    ))
     writer = None
     meta = open(os.path.join(out_dir, "meta.jsonl"), "w")
     print(f"course {src.course.length:.0f} m; writing to {out_dir}")
@@ -166,22 +206,26 @@ def main():
                 break
             h, w = frame.shape[:2]
 
-            lane_offset = compute_lane_offset(frame, roi=SIM_ROI)
+            lane = analyze_lanes(frame, roi=SIM_ROI)        # offset + adjacent-lane flags (real CV)
+            lane_offset = lane.offset
             dist = src.nearest_obstacle_distance_cm()
             detections = detect(frame) if detect else []   # YOLO: optional overlay only
             gt = src.ground_truth()
-            sim_detections = gt_to_detections(gt)          # GT drives control in the sim
-            # Read the speed limit off the nearest sign's PIXELS (classical CV), not
-            # from GT; the tracker's vote keeps a misread from jerking the speed.
-            sl_boxes = [bb for name, bb in gt if name == "speed limit"]
-            reading = (read_speed_limit(frame, max(sl_boxes, key=lambda b: b[3] - b[1]))
-                       if sl_boxes else None)
-            speed_limit = speed_tracker.update(reading)
+            sim_detections = gt_to_detections(gt)          # GT drives OBJECT detection in the sim
+            # Adjacency: vision boundary detection is too sparse at sim scale, so
+            # the exists-check uses GT lane occupancy (the ego's lane index from the
+            # lane it's committed to); the vision flags are still logged to compare.
+            # Lane *offset* (steering) stays fully vision-based.
+            lane_idx = round(veh.lane_lateral / spec.LANE_WIDTH_M + (spec.NUM_LANES - 1) / 2)
+            left_exists = lane_idx > 0
+            right_exists = lane_idx < spec.NUM_LANES - 1
             action = controller.update(lane_offset=lane_offset,
                                        detections=sim_detections, distance_cm=dist,
                                        frame_width=w, frame_height=h,
                                        odometry_m=veh.traveled,
-                                       stop_sign_distance_m=src.next_stop_sign_distance_m())
+                                       stop_sign_distance_m=src.next_stop_sign_distance_m(),
+                                       left_lane_exists=left_exists,
+                                       right_lane_exists=right_exists)
             cv2.imwrite(os.path.join(img_dir, f"frame_{idx:05d}.jpg"), frame)
             with open(os.path.join(lbl_dir, f"frame_{idx:05d}.txt"), "w") as lf:
                 for name, (x1, y1, x2, y2) in gt:
@@ -189,13 +233,18 @@ def main():
                     cx, cy = (x1 + x2) / 2 / w, (y1 + y2) / 2 / h
                     bw, bh = (x2 - x1) / w, (y2 - y1) / h
                     lf.write(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
+            closeness = lead_vehicle_closeness(sim_detections, w, h)
             meta.write(json.dumps({"frame": idx, "offset": lane_offset,
                                    "dist_cm": dist, "action": action.value,
-                                   "speed_limit": speed_limit, "sl_read": reading,
+                                   "left_lane": lane.left_lane_exists,   # vision (comparison)
+                                   "right_lane": lane.right_lane_exists,  # vision (comparison)
+                                   "gt_left": left_exists, "gt_right": right_exists,  # used
+                                   "lc_phase": controller.lane_change.phase.value,
+                                   "closeness": round(closeness, 3) if closeness is not None else None,
+                                   "lane_lateral": round(veh.lane_lateral, 2),
                                    "n_det": len(detections), "n_gt": len(gt)}) + "\n")
 
-            annotated = annotate(frame, lane_offset, detections, gt, action, dist, idx,
-                                 speed_limit=speed_limit)
+            annotated = annotate(frame, lane_offset, detections, gt, action, dist, idx)
             if writer is None:
                 writer = cv2.VideoWriter(os.path.join(out_dir, "annotated.mp4"),
                                          cv2.VideoWriter_fourcc(*"mp4v"),
@@ -206,7 +255,7 @@ def main():
                 veh.traveled += spec.CRUISE_SPEED_MPS * DT
                 scripted_pose(src.ego, src.course, veh.traveled)
             else:
-                veh.apply(action, lane_offset, speed_limit=speed_limit)
+                veh.apply(action, lane_offset)
             src.step_world(DT)
 
             if idx % 20 == 0:

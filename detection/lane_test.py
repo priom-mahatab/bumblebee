@@ -1,63 +1,79 @@
-"""Runs compute_lane_offset on the sample road images and saves a
-visualization (fitted left/right lane lines + frame-center line) for each,
-so you can eyeball how the detector does per image.
+"""Eyeball analyze_lanes on real footage: overlays every detected lane boundary
+(green) and the image-center line (white), and prints/labels the current-lane
+offset plus the left/right adjacent-lane flags.
+
+Runs on the sample road stills and on a few frames sampled from project_video
+(a real multi-lane highway), so you can check that adjacency fires where a
+neighbouring lane is actually visible — BEFORE the taped track exists. The ROI
+here is deliberately WIDE: adjacency can only see lanes whose boundaries fall
+inside the ROI. Thresholds (LANE_LINE_MERGE_PX, the ROI) still need retuning on
+real track footage; highway geometry only proves the algorithm is correct.
 
 Run from the repo root:
     PYTHONPATH=. .cv/bin/python detection/lane_test.py
 """
-import cv2
-import numpy as np
+import os
 
-from vision.lane_detection import compute_lane_offset, _fit_lane_line
+import cv2
+
+from vision.lane_detection import analyze_lanes
 
 ROADS = "datasets/test_images/roads"
+VIDEO = "datasets/test_videos/project_video.mp4"
 OUT = f"{ROADS}/lane_output"
 IMAGES = ["dashcam_lane.png", "lane_2.jpg", "lane_3.jpg"]
 
+# Wide ROI so adjacent-lane boundaries fall inside it (narrow ROI -> no adjacency).
+WIDE_ROI = [(0.03, 0.95), (0.97, 0.95), (0.62, 0.60), (0.38, 0.60)]
 
-def visualize(frame):
-    """Redraws the pipeline's fitted lane lines on the frame (debug only)."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
-    h, w = edges.shape
-    mask = np.zeros_like(edges)
-    poly = np.array([[
-        (int(0.10 * w), int(0.82 * h)), (int(0.95 * w), int(0.82 * h)),
-        (int(0.58 * w), int(0.60 * h)), (int(0.42 * w), int(0.60 * h)),
-    ]], np.int32)
-    cv2.fillPoly(mask, poly, 255)
-    masked = cv2.bitwise_and(edges, mask)
-    lines = cv2.HoughLinesP(masked, 2, np.pi / 180, 50, minLineLength=40, maxLineGap=100)
 
+def annotate(frame, roi=WIDE_ROI):
+    """Draw detected boundaries + center line, and the offset/adjacency read."""
+    h, w = frame.shape[:2]
+    a = analyze_lanes(frame, roi=roi)
     out = frame.copy()
-    cv2.line(out, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
-    if lines is not None:
-        left, right = [], []
-        for x1, y1, x2, y2 in lines.reshape(-1, 4):
-            if x2 == x1:
-                continue
-            s = (y2 - y1) / (x2 - x1)
-            if abs(s) < 0.5:
-                continue
-            (left if s < 0 else right).append((x1, y1, x2, y2))
-        yb, yt = int(0.82 * h), int(0.60 * h)
-        for seg, color in [(left, (255, 0, 0)), (right, (0, 0, 255))]:
-            fit = _fit_lane_line(seg, yb, yt)
-            if fit:
-                cv2.line(out, fit[0], fit[1], color, 5)
-    return out
+    cv2.line(out, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)  # image center
+    for fit in a.boundaries:
+        (xb, yb), (xt, yt) = fit
+        cv2.line(out, (xb, yb), (xt, yt), (0, 255, 0), 4)
+    off = f"{a.offset:+.2f}" if a.offset is not None else "None"
+    cv2.putText(out, f"offset={off}  L={a.left_lane_exists}  R={a.right_lane_exists}",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    return out, a
 
 
 def main():
-    import os
     os.makedirs(OUT, exist_ok=True)
+
+    print("--- sample road stills ---")
     for name in IMAGES:
         frame = cv2.imread(f"{ROADS}/{name}")
-        offset = compute_lane_offset(frame)
-        print(f"{name:20s} -> offset = {offset}")
-        stem = name.rsplit(".", 1)[0]
-        cv2.imwrite(f"{OUT}/{stem}_result.jpg", visualize(frame))
-    print(f"saved visualizations to {OUT}/")
+        if frame is None:
+            print(f"{name:22s} -> MISSING")
+            continue
+        out, a = annotate(frame)
+        print(f"{name:22s} -> offset={a.offset}  L={a.left_lane_exists} "
+              f"R={a.right_lane_exists}  ({len(a.boundaries)} boundaries)")
+        cv2.imwrite(f"{OUT}/{name.rsplit('.', 1)[0]}_result.jpg", out)
+
+    print(f"\n--- {VIDEO} (sampled frames) ---")
+    cap = cv2.VideoCapture(VIDEO)
+    if not cap.isOpened():
+        print("could not open video")
+    else:
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1200
+        for i, f in enumerate(range(100, total, max(1, total // 5))):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            out, a = annotate(frame)
+            print(f"frame {f:5d} -> offset={a.offset}  L={a.left_lane_exists} "
+                  f"R={a.right_lane_exists}  ({len(a.boundaries)} boundaries)")
+            cv2.imwrite(f"{OUT}/project_video_f{f:05d}_result.jpg", out)
+        cap.release()
+
+    print(f"\nsaved overlays to {OUT}/")
 
 
 if __name__ == "__main__":

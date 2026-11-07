@@ -154,21 +154,16 @@ def build_course(min_length: float | None = None) -> Course:
     # populated; offsets are the original single-tile positions.
     for k in range(n_tiles):
         off = k * tile_len
-        # speed-limit signs are GT *targets* (so the camera gets their bbox), but
-        # the number is NOT exposed to perception — it's read from pixels (OCR).
-        sign(off + 16, "speed_limit", class_name="speed limit", value=35,
-             extent=(0.3, 0.45, 0.03))
         sign(off + 48, "stop_sign", class_name="stop sign", extent=(0.4, 0.4, 0.05))
-        sign(off + 92, "speed_limit", class_name="speed limit", value=25,
-             extent=(0.3, 0.45, 0.03))
         sign(off + tile_len - 20, "stop_sign", class_name="stop sign",
              extent=(0.4, 0.4, 0.05))
         # parked car on the right shoulder (static obstacle, off the path)
         car(off + 62, shoulder_lat, extent=(0.9, 0.7, 2.2))
-        # a slower car ahead in the ego lane — ego should SLOW as it closes in
-        car(off + 78, 0.0, speed_mps=2.5, extent=(0.9, 0.7, 2.2))
-        # oncoming car in the far lane
-        car(off + 110, -spec.LANE_WIDTH_M, direction=-1, speed_mps=4.0,
+        # a STALLED car blocking the ego lane, in the clear stretch between the
+        # two stop signs — the ego must change into the (open) right lane to pass.
+        car(off + 85, 0.0, speed_mps=0.0, extent=(0.9, 0.7, 2.2))
+        # oncoming car in the far (left) lane
+        car(off + 115, -spec.LANE_WIDTH_M, direction=-1, speed_mps=4.0,
             extent=(0.9, 0.7, 2.2))
     return c
 

@@ -60,6 +60,21 @@ EDGE_LINE_WIDTH_M = 0.15    # painted line width (matches track.wbt RoadLine)
 DASH_LENGTH_M = 3.0         # dashed divider: dash + gap pattern
 DASH_GAP_M = 3.0
 
+# --- Lane-change (obstacle avoidance) -------------------------------------
+# Controller tunables, road-scale — they override state_machine's small-rover
+# defaults when run_sim builds the LaneChangeController.
+LANE_CHANGE_TRIGGER_CLOSENESS = 0.18  # lead-car bbox height frac that prefers a change over slowing.
+                                      # Must sit BELOW OBSTACLE_SLOW_CLOSENESS (0.22): the lead car
+                                      # moves, so if SLOW engages first it caps the ego below the
+                                      # lead's speed and the gap never closes to a higher trigger.
+LANE_CHANGE_DISTANCE_M = 12.0         # longitudinal distance the lateral move plays out over
+LANE_SETTLE_DISTANCE_M = 6.0          # re-centering distance before a new change can arm
+TARGET_LANE_BLOCKED_CLOSENESS = 0.12  # a vehicle at least this tall in the target lane = not clear
+PREFERRED_SIDE = "right"              # the left lane carries oncoming traffic on this course
+# Maneuver execution (pure-pursuit lateral move; see run_sim.Vehicle).
+LANE_CHANGE_LOOKAHEAD_M = 7.0         # look-ahead point distance into the target lane
+LANE_CHANGE_YAW_RATE_DPS = 35.0       # max yaw rate during a change (sharper than lane-keeping)
+
 # --- Simulation loop ------------------------------------------------------
 SIM_FPS = 20.0              # fixed timestep; main.py assumes ~20 fps on webcam
 
