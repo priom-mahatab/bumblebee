@@ -136,7 +136,7 @@ python -m eval.evaluate
 
 ## Project layout
 
-- `hardware/` — bill of materials, pinout, wiring notes (no code)
+- `hardware/` — [bill of materials](hardware/bill_of_materials.md), [wiring & pinout](hardware/wiring.md), wiring diagram (no code)
 - `vision/` — camera capture, preprocessing, lane detection
 - `detection/` — YOLO inference now; BDD100K prep + fine-tuning later
 - `control/` — `state_machine.py` (pure decision logic) and, once hardware
