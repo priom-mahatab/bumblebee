@@ -13,10 +13,10 @@ cv2.imwrite("edges.jpg", edges)
 h, w = edges.shape
 mask = np.zeros_like(edges)
 polygon = np.array([[
-    (int(0.10*w), int(0.82*h)),   # bottom-left   (above the hood)
-    (int(0.95*w), int(0.82*h)),   # bottom-right
-    (int(0.58*w), int(0.60*h)),   # top-right  (near vanishing point)
-    (int(0.42*w), int(0.60*h)),   # top-left
+    (int(0.10*w), int(0.82*h)),
+    (int(0.95*w), int(0.82*h)),
+    (int(0.58*w), int(0.60*h)),
+    (int(0.42*w), int(0.60*h)),
 ]], dtype=np.int32)
 
 cv2.fillPoly(mask, polygon, 255)
@@ -40,10 +40,10 @@ cv2.imwrite("hough.jpg", overlay)
 
 left, right = [], []
 for x1, y1, x2, y2 in lines[:, 0]:
-    if x2 == x1:            # avoid divide-by-zero 
+    if x2 == x1:  # avoid divide-by-zero
         continue
     slope = (y2 - y1) / (x2 - x1)
-    if abs(slope) < 0.5:   # drop near-horizontal junk
+    if abs(slope) < 0.5:
         continue
     (left if slope < 0 else right).append((x1, y1, x2, y2))
 
@@ -78,7 +78,7 @@ cv2.imwrite("lanes.jpg", lanes_img)
 left_fit  = fit_lane_line(left,  y_bottom, y_top)
 right_fit = fit_lane_line(right, y_bottom, y_top)
 
-left_x  = left_fit[0][0]      # x at y_bottom
+left_x  = left_fit[0][0]
 right_x  = right_fit[0][0]
 lane_center_x = (left_x + right_x) / 2
 frame_center_x = w / 2

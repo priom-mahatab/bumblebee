@@ -1,27 +1,10 @@
-"""Read the number off a speed-limit sign — classical CV, template matching.
-
-This is PERCEPTION, not control. Given a frame and a sign's bounding box (from
-the detector, or the sim's ground truth), it crops the sign and RECOGNIZES the
-digits from pixels — so the limit is *read*, not handed to us (that was the whole
-point of doing this with computer vision rather than reading a value off GT).
-
-How it works:
-  1. crop the sign, keep only the lower "number" band (drops SPEED/LIMIT + border)
-  2. upscale, grayscale, Otsu-threshold -> black digits become white blobs
-  3. find the digit blobs, left-to-right
-  4. match each against rendered 0-9 templates; join them into a number
-
-Templates are drawn from the same bold font the sim letters its signs with, so a
-rendered '2' matches an on-screen '2'. For real-world footage you'd swap the
-recognizer for a trained classifier or Tesseract; the interface stays the same.
-"""
+"""Read the number off a speed-limit sign via classical CV template matching."""
 from __future__ import annotations
 
 import cv2
 import numpy as np
 
-# Same font candidates the sim uses (sim/textures.py), so templates match the
-# on-screen lettering. Kept local to avoid a vision->sim import dependency.
+# Same font candidates the sim uses (sim/textures.py), so templates match on-screen text.
 _FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/HelveticaNeue.ttc",
@@ -29,10 +12,10 @@ _FONT_CANDIDATES = [
     "Arial Bold.ttf",
 ]
 
-_CANON = (40, 64)          # (w, h) every glyph is resized to before matching
-_MATCH_MIN = 0.35          # reject a digit whose best template score is below this
-_MIN_SIGN_PX = 22          # legibility gate: sign bbox shorter than this = unreadable
-_templates: dict[int, np.ndarray] | None = None  # lazy cache {digit: canon glyph}
+_CANON = (40, 64)          # (w, h) px every glyph is resized to before matching
+_MATCH_MIN = 0.35
+_MIN_SIGN_PX = 22          # min sign bbox height in px to attempt a read
+_templates: dict[int, np.ndarray] | None = None
 
 
 def _load_font(size: int):
@@ -59,7 +42,7 @@ def _build_templates() -> dict[int, np.ndarray]:
     font = _load_font(200)
     tpl = {}
     for d in range(10):
-        img = Image.new("L", (240, 300), 0)             # black background
+        img = Image.new("L", (240, 300), 0)
         ImageDraw.Draw(img).text((40, 10), str(d), font=font, fill=255)
         glyph = _tight_canon(np.array(img))
         if glyph is not None:
@@ -81,31 +64,23 @@ def _match_digit(glyph: np.ndarray) -> tuple[int | None, float]:
 
 
 def read_speed_limit(frame: np.ndarray, bbox, min_sign_px: int = _MIN_SIGN_PX) -> int | None:
-    """Recognize the limit on the speed-limit sign at `bbox`, or None if it can't.
-
-    Returns None when the sign is too small to read (legibility gate), when no
-    digits are found, or when any digit is matched with low confidence — a clean
-    'not sure this frame' that the caller debounces across frames.
-    """
+    """Recognize the limit on the speed-limit sign at `bbox`, or None if it can't."""
     global _templates
     if _templates is None:
         _templates = _build_templates()
 
     x1, y1, x2, y2 = (int(v) for v in bbox)
-    if y2 - y1 < min_sign_px:                           # too far / small to read
+    if y2 - y1 < min_sign_px:
         return None
     crop = frame[max(0, y1):y2, max(0, x1):x2]
     h, w = crop.shape[:2]
     if h < 3 or w < 3:
         return None
 
-    # Keep only the number band: lower part of the sign, inset from the border,
-    # so SPEED/LIMIT and the black outline don't get mistaken for digits.
     band = crop[int(0.46 * h):int(0.94 * h), int(0.12 * w):int(0.88 * w)]
     if band.size == 0:
         return None
 
-    # Upscale so the digits have enough pixels to segment and match.
     s = max(1.0, 120.0 / max(1, band.shape[0]))
     band = cv2.resize(band, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
 
@@ -117,8 +92,6 @@ def read_speed_limit(frame: np.ndarray, bbox, min_sign_px: int = _MIN_SIGN_PX) -
     if not boxes:
         return None
     band_h = th.shape[0]
-    # Digits are the tall, not-too-wide blobs; drop specks and any wide
-    # leftover border fragment.
     digit_boxes = sorted(
         (b for b in boxes
          if b[3] > 0.45 * band_h and b[3] < 1.02 * band_h and b[2] < 0.6 * th.shape[1]),
@@ -131,7 +104,7 @@ def read_speed_limit(frame: np.ndarray, bbox, min_sign_px: int = _MIN_SIGN_PX) -
     for (bx, by, bw, bh) in digit_boxes:
         d, score = _match_digit(th[by:by + bh, bx:bx + bw])
         if d is None or score < _MATCH_MIN:
-            return None                                 # unsure -> skip this frame
+            return None
         digits.append(d)
     if not (1 <= len(digits) <= 3):
         return None

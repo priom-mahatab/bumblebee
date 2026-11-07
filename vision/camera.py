@@ -1,6 +1,4 @@
-"""Camera capture abstraction — same read()/release() interface whether
-frames come from a laptop webcam (now) or the Raspberry Pi camera (once
-hardware arrives), so the rest of the pipeline doesn't care which."""
+"""Camera capture abstraction with a common read()/release() interface across sources."""
 import cv2
 
 
@@ -21,10 +19,7 @@ class WebcamSource:
 
 
 class VideoSource:
-    """Reads frames from a video file — the open-loop sim stand-in for
-    running the pipeline on recorded road footage. Same read()/release()
-    interface as the camera sources, so main.py doesn't care it's a file.
-    read() returns None at end-of-file."""
+    """Reads frames from a video file; read() returns None at end-of-file."""
 
     def __init__(self, path: str):
         self.cap = cv2.VideoCapture(path)
@@ -41,11 +36,10 @@ class VideoSource:
 
 
 class PiCameraSource:
-    """Raspberry Pi camera capture via picamera2. Only usable on the Pi
-    itself — picamera2 isn't pip-installable on macOS, see requirements-pi.txt."""
+    """Raspberry Pi camera capture via picamera2, usable only on the Pi."""
 
     def __init__(self):
-        from picamera2 import Picamera2  # imported lazily; Pi-only dependency
+        from picamera2 import Picamera2  # Pi-only dependency, import lazily
 
         self.picam2 = Picamera2()
         self.picam2.configure(self.picam2.create_preview_configuration())

@@ -11,8 +11,7 @@ def to_roi(frame: np.ndarray, roi_top_fraction: float = 0.55) -> np.ndarray:
 
 
 def white_mask(frame: np.ndarray, threshold: int = 200) -> np.ndarray:
-    """Binary mask of near-white pixels — matches white/light tape lane
-    markers on a darker floor/track."""
+    """Binary mask of near-white pixels, matching light tape lane markers."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     _, mask = cv2.threshold(blurred, threshold, 255, cv2.THRESH_BINARY)

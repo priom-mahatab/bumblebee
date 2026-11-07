@@ -1,15 +1,4 @@
-"""Builds the Ursina 3D scene from a Course: a multi-lane road with painted
-lane lines (dashed dividers, solid edges), textured stop/speed-limit signs,
-and some traffic. Everything is `unlit` so it renders the same across GL
-back-ends and so the painted lines keep a constant, detectable brightness.
-
-build_world() returns a World holding:
-  - ego:     an Entity the camera rides on (moved by the control loop)
-  - labels:  LabeledObject list — the ground-truth targets (signs, cars)
-  - a per-frame update(dt) that advances moving traffic
-
-Coordinates follow course.py: X-Z ground plane, +Y up.
-"""
+"""Builds the Ursina 3D scene from a Course (multi-lane road, painted lane lines, textured signs, traffic), rendered unlit for consistent cross-backend appearance and constant line brightness."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,10 +27,6 @@ class LabeledObject:
     extent: tuple            # half-sizes (hx, hy, hz) in the entity's frame
 
 
-# --------------------------------------------------------------------------
-# Geometry helpers
-# --------------------------------------------------------------------------
-
 def _road_mesh(c: course_mod.Course) -> Mesh:
     half = spec.NUM_LANES * spec.LANE_WIDTH_M / 2
     verts, tris, uvs = [], [], []
@@ -61,8 +46,7 @@ def _road_mesh(c: course_mod.Course) -> Mesh:
 
 
 def _line_mesh(c: course_mod.Course, lateral: float, dashed: bool) -> Mesh:
-    """One mesh for a painted line at the given lateral offset. Dashed lines
-    emit quads only during the 'on' part of the dash/gap cycle."""
+    """One mesh for a painted line at the given lateral offset (dashed lines emit quads only during the dash 'on' phase)."""
     half_w = spec.EDGE_LINE_WIDTH_M / 2
     period = spec.DASH_LENGTH_M + spec.DASH_GAP_M
     verts, tris, uvs = [], [], []
@@ -88,8 +72,7 @@ def _line_mesh(c: course_mod.Course, lateral: float, dashed: bool) -> Mesh:
 
 
 def _build_car(holder: Entity, body_color):
-    """A blocky but car-shaped vehicle under `holder` (origin at car centre).
-    Half-extents ~ (0.9, 0.6, 2.2)."""
+    """A blocky car-shaped vehicle under holder (origin at car centre, half-extents ~(0.9, 0.6, 2.2))."""
     Entity(parent=holder, model="cube", color=body_color,
            scale=(1.8, 0.7, 4.4), position=(0, -0.2, 0))
     Entity(parent=holder, model="cube", color=body_color,
@@ -114,10 +97,6 @@ def _build_sign(p: course_mod.Placed) -> Entity:
     return panel
 
 
-# --------------------------------------------------------------------------
-# World
-# --------------------------------------------------------------------------
-
 @dataclass
 class World:
     ego: Entity
@@ -126,10 +105,6 @@ class World:
     course: course_mod.Course
 
     def update(self, dt: float):
-        # Advance each moving car ALONG the road (not in a straight line) so it
-        # keeps its lane through curves: integrate its arc-length position, then
-        # read the road point + heading back off the centreline. Wrapping keeps
-        # it circulating on a long road; direction -1 travels against the course.
         for holder, p in self._moving:
             p.road_dist = (p.road_dist + p.direction * p.speed_mps * dt) % self.course.length
             x, z = self.course.place(p.road_dist, p.lateral)
@@ -139,7 +114,6 @@ class World:
 
 
 def build_world(c: course_mod.Course) -> World:
-    # grass groundplane sized to the course bounds
     minx, maxx = min(c.xs), max(c.xs)
     minz, maxz = min(c.zs), max(c.zs)
     Entity(model="plane", color=GRASS_COLOR,
@@ -160,7 +134,7 @@ def build_world(c: course_mod.Course) -> World:
     for p in c.objects:
         if p.kind in ("stop_sign", "speed_limit"):
             panel = _build_sign(p)
-            if p.class_name:  # GT targets (stop + speed-limit signs); None = not labelled
+            if p.class_name:  # GT targets only; None = not labelled
                 labels.append(LabeledObject(panel, p.class_name, p.extent))
         elif p.kind == "car":
             holder = Entity(position=(p.x, 0.6, p.z), rotation_y=p.heading_deg)

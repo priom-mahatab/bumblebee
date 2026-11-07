@@ -1,18 +1,4 @@
-"""Closed-loop runner for the 3D sim.
-
-Each frame: render what the vehicle's camera sees -> lane detection + YOLO +
-state machine -> feed the resulting Action back into the vehicle's steering, so
-the car actually drives the simulated course responding to lanes, the stop
-sign, and traffic. Writes an annotated video plus an eval-ready ground-truth
-dataset (images + YOLO-format labels + per-frame log).
-
-    PYTHONPATH=. .cv/bin/python -m sim.run_sim                 # self-drive, windowed
-    PYTHONPATH=. .cv/bin/python -m sim.run_sim --headless      # no window (CI / eval)
-    PYTHONPATH=. .cv/bin/python -m sim.run_sim --scripted      # follow centreline (clean tour / GT)
-    PYTHONPATH=. .cv/bin/python -m sim.run_sim --no-detect     # lane + control only (skip YOLO/torch)
-
-Options: --frames N, --out DIR.
-"""
+"""Closed-loop runner for the 3D sim: render camera -> lane + YOLO + state machine -> drive the vehicle, writing an annotated video and an eval-ready ground-truth dataset."""
 from __future__ import annotations
 
 import argparse
@@ -35,15 +21,12 @@ from control.state_machine import Detection
 GT_CLASSES = ["stop sign", "car", "person", "truck", "bus", "speed limit"]
 DT = 1.0 / spec.SIM_FPS
 
-# Lane-detection ROI tuned to the SIM camera geometry (wider/higher than the
-# real-dashcam default, which misses the sim's lane lines). (x_frac, y_frac).
+# ROI tuned to the sim camera geometry; the real-dashcam default misses the sim's lane lines. (x_frac, y_frac)
 SIM_ROI = [(0.0, 0.88), (1.0, 0.88), (0.80, 0.48), (0.20, 0.48)]
 
 
 def gt_to_detections(gt):
-    """Sim ground-truth tuples -> Detection objects for the control layer.
-    Confidence is 1.0: GT is exact, not estimated. This is the perception
-    source that DRIVES control in the sim (YOLO stays an optional overlay)."""
+    """Sim ground-truth tuples -> Detection objects (confidence 1.0; GT is exact and drives control, YOLO stays an overlay)."""
     return [Detection(name, 1.0, bbox) for name, bbox in gt]
 
 
@@ -53,9 +36,9 @@ def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
     if lane_offset is not None:
         lx = int((w / 2) * (1 + lane_offset))
         cv2.circle(frame, (lx, int(0.9 * h)), 8, (0, 255, 255), -1)
-    for name, (x1, y1, x2, y2) in gt_boxes:            # ground truth: thin cyan
+    for name, (x1, y1, x2, y2) in gt_boxes:
         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (255, 200, 0), 1)
-    for d in detections:                               # detections: green
+    for d in detections:
         x1, y1, x2, y2 = map(int, d.bbox)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, f"{d.class_name} {d.confidence:.2f}", (x1, max(y1 - 6, 12)),
@@ -67,8 +50,7 @@ def annotate(frame, lane_offset, detections, gt_boxes, action, dist, idx):
     return frame
 
 def gt_to_detections(gt):
-    """Sim ground-truth tuples -> Detection objects for the control layer.
-    Confidence is 1.0: GT is exact, not estimated."""
+    """Sim ground-truth tuples -> Detection objects (confidence 1.0; GT is exact)."""
     return [Detection(class_name, 1.0, bbox) for class_name, bbox in gt]
 
 def _ego_lane_center() -> float:
@@ -77,19 +59,13 @@ def _ego_lane_center() -> float:
 
 
 def _clamp_lane(lateral: float) -> float:
-    """Clamp a lane-centre lateral to the outermost lanes (a safety net; the
-    controller shouldn't ask to change into a lane that isn't there)."""
+    """Clamp a lane-centre lateral to the outermost lanes (a safety net)."""
     half = (spec.NUM_LANES - 1) / 2 * spec.LANE_WIDTH_M
     return max(-half, min(half, lateral))
 
 
 class Vehicle:
-    """Minimal kinematics: the control Action sets speed and steering.
-
-    Normal driving steers by a P-controller on the vision lane offset. A
-    CHANGE_LEFT/RIGHT action switches to a pure-pursuit lateral move — aim at a
-    point one lane over and steer toward it for the committed maneuver — then
-    hands back to vision lane-keeping, which re-centres in the new lane."""
+    """Minimal kinematics: the Action sets speed, and steering is a P-controller on the lane offset except during a committed pure-pursuit lane change."""
 
     def __init__(self, ego, course):
         self.ego = ego
@@ -97,12 +73,11 @@ class Vehicle:
         self.speed = spec.CRUISE_SPEED_MPS
         self.stop_timer = 0.0
         self.traveled = 0.0
-        self.lane_lateral = _ego_lane_center()  # target lane centre (road-frame lateral)
-        self.changing = False                   # inside a committed lane change
+        self.lane_lateral = _ego_lane_center()
+        self.changing = False
 
     def _steer_to_lane(self, target_lateral: float):
-        """Pure pursuit: aim at a look-ahead point in the target lane and turn
-        the heading toward it (clamped). Auto-straightens once aligned."""
+        """Pure pursuit: aim at a look-ahead point in the target lane and turn toward it (clamped)."""
         tx, tz = self.course.place(self.traveled + spec.LANE_CHANGE_LOOKAHEAD_M, target_lateral)
         desired = math.degrees(math.atan2(tx - self.ego.x, tz - self.ego.z))
         err = (desired - self.ego.rotation_y + 180) % 360 - 180
@@ -111,24 +86,22 @@ class Vehicle:
 
     def apply(self, action: Action, lane_offset: float | None = None):
         cruise = spec.CRUISE_SPEED_MPS
-        # --- speed comes from the discrete action (stop / slow / cruise) ---
         if action == Action.STOP:
             if self.stop_timer <= 0:
                 self.stop_timer = spec.STOP_HOLD_SECONDS
             self.speed = 0.0
         elif self.stop_timer > 0:
-            self.speed = 0.0                           # still serving a stop
+            self.speed = 0.0
         elif action == Action.SLOW:
             self.speed = spec.SLOW_SPEED_MPS
-        else:                                          # FORWARD / TURN_* / CHANGE_* cruise
+        else:
             self.speed = cruise
 
         if self.stop_timer > 0:
             self.stop_timer -= DT
 
-        # --- steering ---
         if action in (Action.CHANGE_LEFT, Action.CHANGE_RIGHT):
-            if not self.changing:                      # rising edge: latch the target lane once
+            if not self.changing:
                 self.changing = True
                 shift = -spec.LANE_WIDTH_M if action == Action.CHANGE_LEFT else spec.LANE_WIDTH_M
                 self.lane_lateral = _clamp_lane(self.lane_lateral + shift)
@@ -136,8 +109,6 @@ class Vehicle:
                 self._steer_to_lane(self.lane_lateral)
         else:
             self.changing = False
-            # vision lane-keeping: yaw_rate = gain * offset, clamped. None (lane
-            # lost) -> hold heading straight.
             yaw = 0.0
             if lane_offset is not None and self.speed > 0:
                 yaw = spec.STEER_GAIN_DPS * lane_offset
@@ -167,14 +138,12 @@ def main():
     ap.add_argument("--out", default="runs/sim")
     args = ap.parse_args()
 
-    # --seconds overrides the frame count and builds a road long enough that the
-    # ego won't reach the end before time's up (1.3x cruise distance + margin).
     n_frames = int(args.seconds * spec.SIM_FPS) if args.seconds else args.frames
     min_length = (spec.CRUISE_SPEED_MPS * args.seconds * 1.3 + 60) if args.seconds else None
 
     detect = None
     if not args.no_detect:
-        from detection.infer import detect  # lazy: avoids loading torch otherwise
+        from detection.infer import detect  # lazy import: avoids loading torch under --no-detect
 
     out_dir = os.path.join(args.out, datetime.now().strftime("%Y%m%d_%H%M%S"))
     img_dir, lbl_dir = os.path.join(out_dir, "images"), os.path.join(out_dir, "labels")
@@ -185,8 +154,6 @@ def main():
 
     src = SimCameraSource(headless=args.headless, min_length=min_length)
     veh = Vehicle(src.ego, src.course)
-    # Full coordinator: emergency-stop > stop-sign > lane-change > lane-keeping.
-    # Lane-change tunables are road-scale (sim), overriding the rover defaults.
     controller = DrivingController(LaneChangeController(
         trigger_closeness=spec.LANE_CHANGE_TRIGGER_CLOSENESS,
         change_distance_m=spec.LANE_CHANGE_DISTANCE_M,
@@ -206,16 +173,13 @@ def main():
                 break
             h, w = frame.shape[:2]
 
-            lane = analyze_lanes(frame, roi=SIM_ROI)        # offset + adjacent-lane flags (real CV)
+            lane = analyze_lanes(frame, roi=SIM_ROI)
             lane_offset = lane.offset
             dist = src.nearest_obstacle_distance_cm()
-            detections = detect(frame) if detect else []   # YOLO: optional overlay only
+            detections = detect(frame) if detect else []
             gt = src.ground_truth()
-            sim_detections = gt_to_detections(gt)          # GT drives OBJECT detection in the sim
-            # Adjacency: vision boundary detection is too sparse at sim scale, so
-            # the exists-check uses GT lane occupancy (the ego's lane index from the
-            # lane it's committed to); the vision flags are still logged to compare.
-            # Lane *offset* (steering) stays fully vision-based.
+            sim_detections = gt_to_detections(gt)          # GT drives object detection in the sim
+            # Adjacency uses GT lane occupancy (vision boundaries are too sparse at sim scale); offset steering stays vision-based.
             lane_idx = round(veh.lane_lateral / spec.LANE_WIDTH_M + (spec.NUM_LANES - 1) / 2)
             left_exists = lane_idx > 0
             right_exists = lane_idx < spec.NUM_LANES - 1
@@ -236,9 +200,9 @@ def main():
             closeness = lead_vehicle_closeness(sim_detections, w, h)
             meta.write(json.dumps({"frame": idx, "offset": lane_offset,
                                    "dist_cm": dist, "action": action.value,
-                                   "left_lane": lane.left_lane_exists,   # vision (comparison)
-                                   "right_lane": lane.right_lane_exists,  # vision (comparison)
-                                   "gt_left": left_exists, "gt_right": right_exists,  # used
+                                   "left_lane": lane.left_lane_exists,   # vision (logged for comparison)
+                                   "right_lane": lane.right_lane_exists,  # vision (logged for comparison)
+                                   "gt_left": left_exists, "gt_right": right_exists,  # GT (actually used)
                                    "lc_phase": controller.lane_change.phase.value,
                                    "closeness": round(closeness, 3) if closeness is not None else None,
                                    "lane_lateral": round(veh.lane_lateral, 2),

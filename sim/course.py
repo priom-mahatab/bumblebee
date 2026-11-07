@@ -1,15 +1,4 @@
-"""The driving course as pure geometry — no rendering, so it can be reasoned
-about and unit-tested on its own.
-
-Convention matches the sim's Ursina world: ground is the X-Z plane, +Y is up,
-and a heading of 0 deg points along +Z, increasing toward +X (a right turn).
-Distances are metres (road-scale, like sim/worlds/track.wbt).
-
-The course is a centreline built from straight and arc segments (the arcs are
-the turns), sampled at a fixed step. Objects (signs, traffic) are placed by
-their distance *along* the centreline and a lateral offset, so they always sit
-correctly relative to the road however the road bends.
-"""
+"""The driving course as pure geometry (no rendering): an X-Z-ground centreline of straight and arc segments, sampled at a fixed step, with objects placed by distance along it and a lateral offset."""
 from __future__ import annotations
 
 import math
@@ -39,11 +28,11 @@ class Placed:
 # Course shape: (segment_type, *params). Arc angle >0 turns right, <0 left.
 _SEGMENTS = [
     ("straight", 30.0),
-    ("arc", 25.0, 60.0),     # sweeping right-hander
+    ("arc", 25.0, 60.0),
     ("straight", 25.0),
-    ("arc", 25.0, -70.0),    # left-hander
+    ("arc", 25.0, -70.0),
     ("straight", 35.0),
-    ("arc", 20.0, 50.0),     # tighter right
+    ("arc", 20.0, 50.0),
     ("straight", 25.0),
 ]
 
@@ -61,8 +50,7 @@ def _right(h_deg: float) -> tuple[float, float]:
 
 
 def _build_centerline(n_tiles: int = 1):
-    """Build the centreline, repeating the segment pattern `n_tiles` times
-    end-to-end (the accumulators carry over, so tiles join seamlessly)."""
+    """Build the centreline, repeating the segment pattern n_tiles times end-to-end."""
     xs, zs, hdgs, cum = [0.0], [0.0], [0.0], [0.0]
     x, z, h, s = 0.0, 0.0, 0.0, 0.0
     for _ in range(n_tiles):
@@ -76,7 +64,7 @@ def _build_centerline(n_tiles: int = 1):
                     z += dz * STEP_M
                     s += STEP_M
                     xs.append(x); zs.append(z); hdgs.append(h); cum.append(s)
-            else:  # arc
+            else:
                 _, radius, angle = seg
                 arc_len = abs(math.radians(angle)) * radius
                 n = max(1, round(arc_len / STEP_M))
@@ -110,21 +98,14 @@ class Course:
         return self.xs[i], self.zs[i], self.hdgs[i]
 
     def place(self, dist: float, lateral: float):
-        """World (x, z) at `dist` along the road, offset `lateral` m to the
-        right (negative = left)."""
+        """World (x, z) at dist along the road, offset lateral m to the right (negative = left)."""
         x, z, h = self.sample(dist)
         rx, rz = _right(h)
         return x + rx * lateral, z + rz * lateral
 
 
 def build_course(min_length: float | None = None) -> Course:
-    """Build the course centreline and place its signs and traffic.
-
-    min_length: if given, the segment pattern is tiled end-to-end until the road
-    is at least this long, and every sign/car is placed once per tile — so a
-    longer run has road, signs, and traffic the whole way (used by the sim's
-    --seconds option). Default (None) = one tile, the original course.
-    """
+    """Build the course centreline and place its signs and traffic, tiling the pattern to at least min_length (one tile if None)."""
     tile_len = _build_centerline(1)[3][-1]
     n_tiles = 1 if not min_length else max(1, math.ceil(min_length / tile_len))
     xs, zs, hdgs, cum = _build_centerline(n_tiles)
@@ -142,27 +123,21 @@ def build_course(min_length: float | None = None) -> Course:
                                 road_dist=dist, lateral=sign_lat, **kw))
 
     def car(dist, lateral, direction=1, **kw):
-        """A car in-lane at `dist` along the road (direction -1 = oncoming).
-        road_dist/lateral/direction let world.update keep it ON the road."""
+        """A car in-lane at dist along the road (direction -1 = oncoming)."""
         x, z = c.place(dist, lateral)
         _, _, h = c.sample(dist)
         c.objects.append(Placed("car", x, z, h + (0 if direction > 0 else 180),
                                 class_name="car", road_dist=dist, lateral=lateral,
                                 direction=direction, **kw))
 
-    # Place signs + traffic once per tile so the whole (possibly long) road is
-    # populated; offsets are the original single-tile positions.
     for k in range(n_tiles):
         off = k * tile_len
         sign(off + 48, "stop_sign", class_name="stop sign", extent=(0.4, 0.4, 0.05))
         sign(off + tile_len - 20, "stop_sign", class_name="stop sign",
              extent=(0.4, 0.4, 0.05))
-        # parked car on the right shoulder (static obstacle, off the path)
         car(off + 62, shoulder_lat, extent=(0.9, 0.7, 2.2))
-        # a STALLED car blocking the ego lane, in the clear stretch between the
-        # two stop signs — the ego must change into the (open) right lane to pass.
+        # stalled car blocking the ego lane — the ego must change into the open right lane to pass
         car(off + 85, 0.0, speed_mps=0.0, extent=(0.9, 0.7, 2.2))
-        # oncoming car in the far (left) lane
         car(off + 115, -spec.LANE_WIDTH_M, direction=-1, speed_mps=4.0,
             extent=(0.9, 0.7, 2.2))
     return c

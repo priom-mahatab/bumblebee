@@ -1,6 +1,4 @@
-"""Turns a raw frame into lane geometry the control loop can steer on:
-the current lane's center offset, plus whether an adjacent lane exists on each
-side (so the lane-change controller knows where it may legally move)."""
+"""Turns a raw frame into lane geometry: current-lane center offset plus adjacent-lane flags."""
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -9,15 +7,7 @@ import cv2
 
 @dataclass
 class LaneAnalysis:
-    """One frame's lane read.
-
-    offset keeps the EXACT meaning/units of the old compute_lane_offset: the
-    signed fraction of half-frame-width the current lane's center sits from image
-    center (negative = lane center is left of image center), or None if no lane
-    was found. left/right_lane_exists say whether another boundary was found
-    beyond the current lane's boundary on that side. boundaries holds every
-    detected boundary as a fitted ((x_bottom, y_bottom), (x_top, y_top)) line,
-    left->right, for overlay/debugging (the controller ignores it)."""
+    """One frame's lane read: signed offset (fraction of half-frame-width, negative = left of center, None if no lane), adjacent-lane flags, and fitted boundaries left->right."""
     offset: float | None
     left_lane_exists: bool = False
     right_lane_exists: bool = False
@@ -34,44 +24,26 @@ def _fit_lane_line(segments, y_bottom, y_top):
     return (int(m * y_bottom + b), y_bottom), (int(m * y_top + b), y_top)
 
 
-# ROI trapezoid as (x_frac, y_frac) corners. The ROI is CAMERA-SPECIFIC:
-# this default suits real dashcam clips; the sim has different geometry and
-# passes its own trapezoid (see SIM_ROI in sim/run_sim.py).
+# ROI trapezoid as (x_frac, y_frac) corners; camera-specific (sim passes its own).
 REAL_ROI = [(0.10, 0.82), (0.95, 0.82), (0.58, 0.60), (0.42, 0.60)]
 
-# Half the lane width at the look-ahead sample point, as a fraction of frame
-# width. Used to reconstruct the lane center from ONE line when the other leaves
-# view mid-curve (measured ~0.215 in the sim; only used in the one-sided case).
+# Half lane width as fraction of frame width; reconstructs center from one boundary.
 LANE_HALF_WIDTH_FRAC = 0.215
 
-# Two Hough segments whose x-intercepts at the bottom of the ROI are within this
-# many pixels are treated as the same lane boundary. Separate boundaries sit a
-# lane-width apart, well beyond it. Tune to the track's lane width in pixels.
+# Segments within this many px at the ROI bottom are the same boundary.
 LANE_LINE_MERGE_PX = 40
-# A boundary cluster backed by fewer segments than this is dropped as noise.
-# Start at 1 (synthetic frames yield few segments); raise on real footage if
-# spurious boundaries flicker the adjacency flags.
 MIN_SEGMENTS_PER_BOUNDARY = 1
 
 
 def _segment_bottom_x(seg: tuple[int, int, int, int], y_bottom: int) -> float:
-    """x where the line through this segment crosses y_bottom (the ROI's near
-    edge). Grouping on this — where a boundary would meet the car — is stable
-    under perspective, since lines that converge far away are still separated
-    up close."""
+    """x where the line through this segment crosses y_bottom (the ROI's near edge)."""
     x1, y1, x2, y2 = seg
-    m = (x2 - x1) / (y2 - y1)          # x as a function of y; y2 != y1 (horizontals dropped)
+    m = (x2 - x1) / (y2 - y1)          # y2 != y1: horizontals already dropped
     return m * (y_bottom - y1) + x1
 
 
 def _cluster_boundaries(segments, y_bottom, y_top, merge_px, min_segments):
-    """Group segments into individual lane boundaries by bottom x-intercept and
-    fit a line to each; returns the fits sorted left->right.
-
-    This replaces the old slope-sign bucketing, which lumped every left-leaning
-    segment into one line and every right-leaning one into another — correct for
-    a single lane, but on a multi-lane road it averages several boundaries into a
-    phantom pair. Here each real boundary stays its own cluster."""
+    """Group segments into lane boundaries by bottom x-intercept, fit each, and return fits left->right."""
     keyed = sorted((_segment_bottom_x(s, y_bottom), s) for s in segments)
     clusters, cluster, last_x = [], [], None
     for xb, seg in keyed:
@@ -90,20 +62,14 @@ def _cluster_boundaries(segments, y_bottom, y_top, merge_px, min_segments):
         fit = _fit_lane_line(cl, y_bottom, y_top)
         if fit is not None:
             fits.append(fit)
-    fits.sort(key=lambda f: f[0][0])   # left -> right by bottom x
+    fits.sort(key=lambda f: f[0][0])
     return fits
 
 
 def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
                   merge_px: int = LANE_LINE_MERGE_PX,
                   min_segments: int = MIN_SEGMENTS_PER_BOUNDARY) -> LaneAnalysis:
-    """Full lane read: current-lane offset plus adjacent-lane flags (see
-    LaneAnalysis). Finds EVERY boundary in the ROI, takes the pair straddling the
-    car as the current lane, and reports whether more boundaries lie beyond them.
-
-    NOTE: adjacency only works if the ROI is wide enough to contain the
-    neighbouring boundaries. An ROI framed tightly to one lane (good for
-    lane-keeping) will always report no adjacent lanes — widen it for adjacency."""
+    """Full lane read: current-lane offset plus adjacent-lane flags; adjacency needs an ROI wide enough to contain neighbouring boundaries."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
@@ -120,9 +86,9 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
 
     segments = []
     for x1, y1, x2, y2 in lines.reshape(-1, 4):
-        if x2 == x1:                                   # vertical: no finite slope
+        if x2 == x1:
             continue
-        if abs((y2 - y1) / (x2 - x1)) < 0.5:           # near-horizontal: not a lane line
+        if abs((y2 - y1) / (x2 - x1)) < 0.5:           # drop near-horizontal non-lane lines
             continue
         segments.append((x1, y1, x2, y2))
 
@@ -133,18 +99,14 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
         return LaneAnalysis(None)
 
     center_x = w / 2
-    # Current lane = nearest boundary left of center, nearest boundary right of it.
     left_idx = right_idx = None
     for i, fit in enumerate(boundaries):
         if fit[0][0] <= center_x:
-            left_idx = i                               # keep the last one <= center
+            left_idx = i
         else:
-            right_idx = i                              # first one > center
+            right_idx = i
             break
 
-    # Sample the lane center at a LOOK-AHEAD point along each boundary (fit[0] is
-    # the near end, fit[1] the far end) so the car steers INTO curves rather than
-    # reacting only once the bend reaches the bumper.
     def sample_x(fit):
         return fit[0][0] + lookahead * (fit[1][0] - fit[0][0])
 
@@ -153,8 +115,8 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
     right_fit = boundaries[right_idx] if right_idx is not None else None
     if left_fit is not None and right_fit is not None:
         lane_center_x = (sample_x(left_fit) + sample_x(right_fit)) / 2
-    elif left_fit is not None:                         # only one boundary visible:
-        lane_center_x = sample_x(left_fit) + half_w    # offset it by the known half-width
+    elif left_fit is not None:
+        lane_center_x = sample_x(left_fit) + half_w
     elif right_fit is not None:
         lane_center_x = sample_x(right_fit) - half_w
     else:
@@ -167,21 +129,14 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
 
 
 def compute_lane_offset(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85) -> float | None:
-    """Current-lane center offset only — a thin wrapper over analyze_lanes, kept
-    so existing callers (main.py, the sim, lane_test) stay unchanged. Same signed
-    fraction as before; None when no lane is found. NOTE: on a multi-lane frame
-    this now returns the EGO lane's offset (nearest boundaries straddling the
-    car), not the old slope-averaged phantom — an intended fix, but re-verify on
-    real clips since the number can shift from the previous behavior."""
+    """Current-lane center offset only, a thin wrapper over analyze_lanes for existing callers."""
     return analyze_lanes(frame, roi, lookahead).offset
 
 
 if __name__ == "__main__":
     from sim.mock_inputs import make_lane_frame
 
-    # Wide ROI so neighbouring boundaries fall inside it (adjacency needs this).
     WIDE_ROI = [(0.02, 0.96), (0.98, 0.96), (0.62, 0.52), (0.38, 0.52)]
-    #  label, boundary x-fractions (left->right), expected (left_lane, right_lane)
     cases = [
         ("1 lane, centered",        [0.35, 0.65],             False, False),
         ("2 lanes, in left lane",   [0.30, 0.55, 0.80],       False, True),

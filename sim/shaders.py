@@ -1,17 +1,4 @@
-"""A minimal unlit shader written in GLSL 120.
-
-Why this exists: ursina's built-in `unlit_shader` is GLSL 130 (vertex) / 140
-(fragment), and **macOS supports neither** — Apple's GL stack offers only
-GLSL 120 (legacy context) or 150+ (core profile), nothing in between. So on a
-Mac ursina's shaders fail to compile ("version '130' is not supported") and
-every surface renders black. GLSL 120 compiles on the stock macOS GL context,
-so the sim shows its real colours/textures with no context changes.
-
-It's a straight port of ursina's unlit shader (output = texture * colour-scale *
-vertex colour), only down-levelled to 120 syntax (`attribute`/`varying`/
-`texture2D`/`gl_FragColor`). Untextured entities get Panda's default white
-sampler, so a plain coloured mesh shows its colour.
-"""
+"""A minimal unlit shader in GLSL 120, because macOS GL supports only 120 or 150+ and ursina's built-in unlit shader (GLSL 130/140) fails to compile there and renders black."""
 from ursina import Shader, Vec2
 
 _VERT = """#version 120

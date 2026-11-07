@@ -1,17 +1,4 @@
-"""Full pipeline runner: frame source -> lane detection + object detection ->
-control decision -> annotated output. No motors involved — this exercises the
-whole software pipeline before hardware arrives. motor_control.py plugs in once
-the Pi and motor driver are wired up.
-
-Usage:
-    # run on a recorded road video (open-loop sim stand-in):
-    PYTHONPATH=. .cv/bin/python main.py path/to/road.mp4
-    # or live laptop webcam (no argument):
-    PYTHONPATH=. .cv/bin/python main.py
-
-Writes an annotated video (lanes/detections/action drawn on each frame) to
-runs/pipeline/annotated.mp4 so you can watch the pipeline's decisions.
-"""
+"""Full pipeline runner: frame source -> lane + object detection -> control decision -> annotated video."""
 import os
 import sys
 from datetime import datetime
@@ -28,24 +15,20 @@ OUT_DIR = "runs/pipeline"
 
 
 def annotate(frame, lane_offset, detections, action, closeness):
-    """Draw the pipeline's view on the frame: detection boxes, the lane-center
-    marker (reconstructed from the offset) vs. frame center, and a HUD line."""
+    """Draw detection boxes, the lane-center marker vs. frame center, and a HUD line."""
     h, w = frame.shape[:2]
 
-    # frame center (where the car is pointing) vs. lane center (where it wants to be)
     cv2.line(frame, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
     if lane_offset is not None:
         lane_x = int((w / 2) * (1 + lane_offset))
         cv2.circle(frame, (lane_x, int(0.9 * h)), 8, (0, 255, 255), -1)
 
-    # object detections
     for d in detections:
         x1, y1, x2, y2 = map(int, d.bbox)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.putText(frame, f"{d.class_name} {d.confidence:.2f}", (x1, max(y1 - 6, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-    # HUD
     off_txt = f"{lane_offset:+.3f}" if lane_offset is not None else "none"
     cv2.putText(frame, f"offset: {off_txt}   action: {action.value}", (10, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
@@ -67,22 +50,21 @@ def main():
         is_video = False
         print("Running pipeline on webcam. Press Ctrl+C to stop.")
 
-    # unique output name per run: <source>_<timestamp>.mp4 (never overwrites)
     stem = Path(video_path).stem if video_path else "webcam"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = os.path.join(OUT_DIR, f"{stem}_{timestamp}.mp4")
     os.makedirs(OUT_DIR, exist_ok=True)
     writer = None
     frames = 0
-    controller = StopSignController()  # holds stop-sign pause-and-go state across frames
+    controller = StopSignController()
 
     try:
         while True:
             frame = source.read()
             if frame is None:
                 if is_video:
-                    break          # end of file
-                continue           # webcam dropped a frame
+                    break
+                continue
 
             lane_offset = compute_lane_offset(frame)
             detections = detect(frame)
@@ -90,7 +72,7 @@ def main():
             action = controller.update(
                 lane_offset=lane_offset,
                 detections=detections,
-                distance_cm=None,          # no ultrasonic sensor yet
+                distance_cm=None,          # no ultrasonic sensor yet (hardware pending)
                 frame_width=frame.shape[1],
                 frame_height=frame.shape[0],
             )

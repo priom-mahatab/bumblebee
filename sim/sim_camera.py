@@ -1,20 +1,4 @@
-"""SimCameraSource — the simulator dressed up as a camera.
-
-It exposes the same read()/release() contract as vision/camera.py's
-WebcamSource/PiCameraSource, so main.py and the pipeline can't tell it isn't a
-real camera. On top of that it offers:
-
-  - ground_truth():  exact 2D boxes + labels for every target in view, by
-                     projecting the objects' 3D extents through the same lens
-                     that rendered the frame — this is the eval ground truth.
-  - nearest_obstacle_distance_cm():  a stand-in for the ultrasonic sensor.
-  - world / ego:     so the control loop can steer the vehicle each frame.
-
-Rendering uses the main window's camera; frames are read back from a RAM-copy
-render texture (fast path) and resized to the configured processing resolution.
-Ground-truth projection is pure transform math (no render needed), so it stays
-correct even where a given GL back-end can't draw.
-"""
+"""SimCameraSource: the simulator presented as a camera, exposing vision/camera.py's read()/release() contract plus ground-truth boxes, an ultrasonic distance stand-in, and world/ego handles for the control loop."""
 from __future__ import annotations
 
 import cv2
@@ -40,20 +24,13 @@ class SimCameraSource:
 
         self.app = Ursina(borderless=False, development_mode=False)
         self._camera = camera
-        # Render everything flat/fullbright with a GLSL-120 unlit shader. Two
-        # reasons: (1) ursina's own shaders are GLSL 130/140, which macOS can't
-        # compile, so they'd render black (see sim/shaders.py); (2) the road and
-        # lane-line meshes carry no normals, so any *lit* shader would shade them
-        # black anyway. Flat shading also keeps the white lines a constant
-        # brightness for lane detection. Entities must NOT pass unlit=True — that
-        # would re-attach ursina's 130/140 shader and override this.
+        # Flat GLSL-120 unlit shader: ursina's 130/140 shaders fail on macOS and the normal-less meshes would shade black anyway. Entities must NOT pass unlit=True (re-attaches the 130/140 shader).
         Entity.default_shader = mac_unlit_shader
 
         self.course = course_mod.build_course(min_length=min_length)
         self.world = build_world(self.course)
         self.ego = self.world.ego
 
-        # mount the camera on the vehicle: up, forward, and tilted down
         camera.parent = self.ego
         camera.position = (0, spec.CAM_HEIGHT_M, spec.CAM_FORWARD_OFFSET_M)
         camera.rotation = (spec.CAM_PITCH_DEG, 0, 0)  # +x = nose down
@@ -61,12 +38,9 @@ class SimCameraSource:
         self._lens.setFov(spec.CAM_HFOV_DEG, spec.vertical_fov_deg())
         self._lens.setNearFar(0.1, 400)
 
-        # RAM-copy render texture: fast frame read-back from the window
         self._tex = Texture()
         self.app.win.addRenderTexture(self._tex, GraphicsOutput.RTMCopyRam)
         self.app.graphicsEngine.renderFrame()  # realize the buffer once
-
-    # --- camera contract --------------------------------------------------
 
     def read(self) -> np.ndarray | None:
         self.app.graphicsEngine.renderFrame()
@@ -85,8 +59,6 @@ class SimCameraSource:
         except Exception:
             pass
 
-    # --- ground truth / sensors ------------------------------------------
-
     def _project(self, world_pt) -> tuple[float, float, float] | None:
         """World point -> (px, py, forward_m). None if behind the camera."""
         rel = self.app.cam.getRelativePoint(self.app.render,
@@ -96,7 +68,7 @@ class SimCameraSource:
             return None
         px = (film.x * 0.5 + 0.5) * spec.CAM_WIDTH
         py = (1 - (film.y * 0.5 + 0.5)) * spec.CAM_HEIGHT
-        return px, py, rel.y  # rel.y is forward distance in camera space
+        return px, py, rel.y  # rel.y = forward distance in camera space
 
     def ground_truth(self) -> list[tuple[str, tuple[float, float, float, float]]]:
         """[(class_name, (x1, y1, x2, y2)), ...] for targets visible this frame."""
@@ -116,14 +88,13 @@ class SimCameraSource:
                 continue
             x1, x2 = max(0, min(xs)), min(spec.CAM_WIDTH, max(xs))
             y1, y2 = max(0, min(ys)), min(spec.CAM_HEIGHT, max(ys))
-            if x2 - x1 < 2 or y2 - y1 < 2:      # off-screen or too small
+            if x2 - x1 < 2 or y2 - y1 < 2:
                 continue
             out.append((obj.class_name, (x1, y1, x2, y2)))
         return out
 
     def nearest_obstacle_distance_cm(self) -> float | None:
-        """Forward distance (cm) to the nearest car/person roughly in the ego
-        path — the ultrasonic sensor's stand-in. None if nothing is ahead."""
+        """Forward distance (cm) to the nearest car/person roughly in the ego path (ultrasonic stand-in), or None if nothing is ahead."""
         best = None
         for obj in self.world.labels:
             if obj.class_name not in ("car", "person", "truck", "bus"):
@@ -133,7 +104,7 @@ class SimCameraSource:
             if p is None or p[2] <= 0:
                 continue
             px_frac = p[0] / spec.CAM_WIDTH
-            if 0.35 < px_frac < 0.65:           # in front, not off to the side
+            if 0.35 < px_frac < 0.65:
                 d = p[2] * 100
                 best = d if best is None else min(best, d)
         return best
@@ -146,12 +117,7 @@ class SimCameraSource:
         return c.cum[i]
 
     def next_stop_sign_distance_m(self) -> float | None:
-        """Curve-aware along-road distance from the ego to the next stop sign
-        ahead, or None if none remain. It's measured as arc length (not the
-        straight-line chord) so it stays correct through the course's bends, and
-        the control layer dead-reckons against the same arc-length odometry. The
-        sim can give this exactly because it authored the sign positions; a real
-        car would range the sign off its bounding box instead."""
+        """Curve-aware along-road (arc-length) distance from the ego to the next stop sign ahead, or None if none remain."""
         ego_s = self._road_distance_m(self.ego.x, self.ego.z)
         best = None
         for o in self.course.objects:

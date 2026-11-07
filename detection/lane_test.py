@@ -1,17 +1,4 @@
-"""Eyeball analyze_lanes on real footage: overlays every detected lane boundary
-(green) and the image-center line (white), and prints/labels the current-lane
-offset plus the left/right adjacent-lane flags.
-
-Runs on the sample road stills and on a few frames sampled from project_video
-(a real multi-lane highway), so you can check that adjacency fires where a
-neighbouring lane is actually visible — BEFORE the taped track exists. The ROI
-here is deliberately WIDE: adjacency can only see lanes whose boundaries fall
-inside the ROI. Thresholds (LANE_LINE_MERGE_PX, the ROI) still need retuning on
-real track footage; highway geometry only proves the algorithm is correct.
-
-Run from the repo root:
-    PYTHONPATH=. .cv/bin/python detection/lane_test.py
-"""
+"""Overlay analyze_lanes output on real footage to eyeball lane offset and adjacency flags."""
 import os
 
 import cv2
@@ -32,7 +19,7 @@ def annotate(frame, roi=WIDE_ROI):
     h, w = frame.shape[:2]
     a = analyze_lanes(frame, roi=roi)
     out = frame.copy()
-    cv2.line(out, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)  # image center
+    cv2.line(out, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
     for fit in a.boundaries:
         (xb, yb), (xt, yt) = fit
         cv2.line(out, (xb, yb), (xt, yt), (0, 255, 0), 4)

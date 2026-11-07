@@ -1,14 +1,4 @@
-"""Procedurally generated sign textures, written to sim/assets/ on first use.
-
-The point of the textured-3D sim is that the YOLO detector (trained on real
-road imagery) has something realistic to fire on. A flat-shaded box doesn't
-look like a stop sign to it; a red octagon with white "STOP" does. These are
-generated with Pillow so the repo carries no binary image assets — same spirit
-as the Webots world pulling its textures from URLs rather than vendoring them.
-
-Swap in a photograph of a real sign by dropping a file at the same path and
-deleting the generated one; everything downstream just reads the path.
-"""
+"""Procedurally generated sign textures, written to sim/assets/ on first use, so the detector has realistic signs and the repo carries no binary image assets."""
 from __future__ import annotations
 
 import math
@@ -18,8 +8,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 ASSET_DIR = Path(__file__).parent / "assets"
 
-# System fonts to try, in order, for crisp sign lettering. Falls back to an
-# upscaled bitmap of Pillow's default font if none are present.
+# System fonts to try, in order; falls back to Pillow's default font if none are present.
 _FONT_CANDIDATES = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",   # macOS
     "/System/Library/Fonts/HelveticaNeue.ttc",             # macOS
@@ -47,8 +36,7 @@ def _draw_centered(draw: ImageDraw.ImageDraw, box, text, font, fill):
 
 
 def stop_sign(size: int = 512) -> str:
-    """A US stop sign: red regular octagon, white ring, white STOP. Returns path.
-    Background is transparent so the quad shows only the octagon."""
+    """A US stop sign (red octagon, white ring, white STOP) on a transparent background; returns the file path."""
     path = ASSET_DIR / "stop_sign.png"
     if path.exists():
         return str(path)
@@ -58,13 +46,11 @@ def stop_sign(size: int = 512) -> str:
     draw = ImageDraw.Draw(img)
     cx = cy = size / 2
     r = size * 0.48
-    # a regular octagon, flat side up (standard orientation)
     pts = [
         (cx + r * math.cos(math.radians(a)), cy + r * math.sin(math.radians(a)))
         for a in range(22, 360, 45)
     ]
-    draw.polygon(pts, fill=(197, 24, 24, 255))          # sign red
-    # white ring just inside the edge
+    draw.polygon(pts, fill=(197, 24, 24, 255))
     inner = [
         (cx + r * 0.86 * math.cos(math.radians(a)), cy + r * 0.86 * math.sin(math.radians(a)))
         for a in range(22, 360, 45)
@@ -73,14 +59,13 @@ def stop_sign(size: int = 512) -> str:
     draw.line(inner + [inner[0]], fill=(255, 255, 255, 255), width=max(2, size // 90))
     _draw_centered(draw, (0, size * 0.33, size, size * 0.67),
                    "STOP", _load_font(int(size * 0.28)), (255, 255, 255, 255))
-    # The sign faces oncoming traffic, so the camera sees the quad's back face;
-    # pre-flipping horizontally makes the lettering read correctly in-scene.
+    # sign faces oncoming traffic, so pre-flip horizontally for correct lettering on the quad's back face
     img.transpose(Image.FLIP_LEFT_RIGHT).save(path)
     return str(path)
 
 
 def speed_limit(value: int = 35, size: int = 512) -> str:
-    """A US speed-limit sign (scene realism; not a detector class). Returns path."""
+    """A US speed-limit sign (scene realism, not a detector class); returns the file path."""
     path = ASSET_DIR / f"speed_limit_{value}.png"
     if path.exists():
         return str(path)
