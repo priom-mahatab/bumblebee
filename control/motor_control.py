@@ -40,9 +40,9 @@ class Motors:
     """Left/right tank drive over 4 wheels with a background failsafe watchdog."""
 
     def __init__(self):
-        # BCM pins and inv flags from vanguard-rover docs/wiring_pi3.svg (same chassis).
-        self.bl = Wheel(12, 5, 6, inv=False)
-        self.fl = Wheel(13, 16, 26, inv=False)
+        # BCM pins from vanguard-rover docs/wiring_pi3.svg (same chassis); inv flags verified on-car via _bringup.
+        self.bl = Wheel(12, 5, 6, inv=True)
+        self.fl = Wheel(13, 16, 26, inv=True)
         self.fr = Wheel(18, 23, 24, inv=True)
         self.br = Wheel(19, 20, 21, inv=True)
         self._all = (self.bl, self.fl, self.fr, self.br)
