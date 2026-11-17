@@ -5,3 +5,4 @@
 # If using a venv on the Pi, create it with --system-site-packages so it can
 # see the apt-installed picamera2.
 gpiozero
+lgpio       # gpiozero's pin-factory backend on Raspberry Pi OS Bookworm

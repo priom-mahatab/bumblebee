@@ -38,7 +38,7 @@ SLOW_DISTANCE_CM = 40
 LANE_OFFSET_DEADZONE = 0.08  # fraction of half-frame-width
 IN_PATH_X_RANGE = (0.3, 0.7)  # fraction of frame width
 STOP_SIGN_CLASSES = {"stop sign"}
-OBSTACLE_CLASSES = {"person", "car", "truck", "bus"}
+OBSTACLE_CLASSES = {"person", "car", "truck", "bus", "obstacle"}
 OBSTACLE_SLOW_CLOSENESS = 0.22  # bbox height fraction
 OBSTACLE_STOP_CLOSENESS = 0.45  # bbox height fraction
 STOP_LINE_MARGIN_M = 1.0
@@ -48,6 +48,7 @@ STOP_SIGN_CLEAR_FRAMES = 3
 SPEED_LIMIT_VOTE_FRAMES = 3
 
 LANE_CHANGE_TRIGGER_CLOSENESS = 0.30  # above SLOW, below STOP
+LANE_CHANGE_TRIGGER_DISTANCE_CM = 35  # ultrasonic trigger; within SLOW band, above STOP
 LANE_CHANGE_ARM_FRAMES = 3
 LANE_CHANGE_DISTANCE_M = 1.0
 LANE_SETTLE_DISTANCE_M = 0.5
@@ -205,6 +206,7 @@ class LaneChangeController:
         self,
         *,
         trigger_closeness: float = LANE_CHANGE_TRIGGER_CLOSENESS,
+        trigger_distance_cm: float | None = LANE_CHANGE_TRIGGER_DISTANCE_CM,
         arm_frames: int = LANE_CHANGE_ARM_FRAMES,
         change_distance_m: float = LANE_CHANGE_DISTANCE_M,
         settle_distance_m: float = LANE_SETTLE_DISTANCE_M,
@@ -214,6 +216,7 @@ class LaneChangeController:
         right_lane_band: tuple[float, float] = RIGHT_LANE_X_RANGE,
     ) -> None:
         self.trigger_closeness = trigger_closeness
+        self.trigger_distance_cm = trigger_distance_cm
         self.arm_frames = arm_frames
         self.change_distance_m = change_distance_m
         self.settle_distance_m = settle_distance_m
@@ -256,10 +259,14 @@ class LaneChangeController:
         odometry_m: float,
         left_lane_exists: bool,
         right_lane_exists: bool,
+        distance_cm: float | None = None,
     ) -> Action | None:
         if self.phase is LaneChangePhase.IN_LANE:
             closeness = lead_vehicle_closeness(detections, frame_width, frame_height)
-            if closeness is not None and closeness >= self.trigger_closeness:
+            close_trigger = closeness is not None and closeness >= self.trigger_closeness
+            dist_trigger = (self.trigger_distance_cm is not None and distance_cm is not None
+                            and distance_cm < self.trigger_distance_cm)
+            if close_trigger or dist_trigger:
                 self.arm_streak += 1
             else:
                 self.arm_streak = 0
@@ -289,7 +296,7 @@ class LaneChangeController:
 
 
 class DrivingController:
-    """Top-level coordinator applying the priority ladder: ultrasonic STOP > stop-sign hold > lane change > decide_action."""
+    """Top-level coordinator applying the priority ladder: stop-sign hold > lane change > ultrasonic/obstacle slow-stop (decide_action)."""
 
     def __init__(self, lane_change: "LaneChangeController | None" = None) -> None:
         self.stop_sign = StopSignController()
@@ -311,16 +318,13 @@ class DrivingController:
         if now is None:
             now = time.monotonic()
 
-        if distance_cm is not None and distance_cm < STOP_DISTANCE_CM:
-            return Action.STOP
-
         stop_override = self.stop_sign.advance(detections, odometry_m, stop_sign_distance_m, now)
         if stop_override is not None:
             return stop_override
 
         lane_override = self.lane_change.update(
             detections, frame_width, frame_height, odometry_m,
-            left_lane_exists, right_lane_exists)
+            left_lane_exists, right_lane_exists, distance_cm=distance_cm)
         if lane_override is not None:
             return lane_override
 
