@@ -1,8 +1,10 @@
 """Closed-loop rover driver on the Pi: camera -> lane + colour-obstacle detection -> control -> motors."""
+import argparse
 import time
 
 from control.motor_control import Motors, Ultrasonic, action_to_drive
 from control.state_machine import DrivingController
+from runlog import RunLogger
 from vision.camera import PiCameraSource
 from vision.lane_detection import analyze_lanes
 from vision.obstacles import detect_obstacles
@@ -12,10 +14,16 @@ LOOP_HZ = 15
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run the rover control loop with logging.")
+    parser.add_argument("--no-frames", action="store_true", help="log telemetry only, don't save frames")
+    parser.add_argument("--frame-every", type=int, default=1, help="save every Nth frame (default 1)")
+    args = parser.parse_args()
+
     cam = PiCameraSource()
     motors = Motors()
     sonar = Ultrasonic()
     controller = DrivingController()
+    logger = RunLogger(save_frames=not args.no_frames, frame_every=args.frame_every)
     period = 1.0 / LOOP_HZ
     start = time.monotonic()
     try:
@@ -42,7 +50,21 @@ def main():
             )
             l, r = action_to_drive(action)
             motors.drive(l, r)
-            print(f"offset={lanes.offset} dist={distance_cm:5.1f}cm "
+
+            logger.log({
+                "frame": logger.count,
+                "t": round(time.monotonic() - start, 3),
+                "offset": lanes.offset,
+                "left_lane": lanes.left_lane_exists,
+                "right_lane": lanes.right_lane_exists,
+                "dist_cm": round(distance_cm, 1),
+                "obstacles": len(detections),
+                "action": action.value,
+                "drive_l": l,
+                "drive_r": r,
+                "odometry_m": round(odometry_m, 3),
+            }, frame)
+            print(f"[{logger.count:5d}] offset={lanes.offset} dist={distance_cm:5.1f}cm "
                   f"obstacles={len(detections)} -> {action.value:11s} drive=({l},{r})")
 
             dt = time.monotonic() - t0
@@ -54,6 +76,7 @@ def main():
         motors.close()
         sonar.close()
         cam.release()
+        logger.close()
 
 
 if __name__ == "__main__":
