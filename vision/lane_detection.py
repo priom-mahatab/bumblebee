@@ -189,7 +189,7 @@ def _analyze_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> LaneAnal
 
 
 def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[LaneAnalysis, dict]:
-    """Track the ego tapes bin by bin outward on the floor plane, seeded from tracker memory when available, and steer toward the lane centre at the lookahead distance; tapes steeper than STEEP_TAPE_SLOPE count only as a parallel pair, and a lone tape must span LONE_TAPE_MIN_BINS bins."""
+    """Track the ego tapes bin by bin outward on the floor plane, seeded from tracker memory when available, and steer toward the lane centre at the lookahead distance; a guessed-side tape steeper than STEEP_TAPE_SLOPE counts only as part of a parallel pair, a lone tape must span LONE_TAPE_MIN_BINS bins, and a lone tape puts the centre half a lane perpendicular to it; a left/right pair not about a lane width apart keeps only its longer track."""
     ys, xs = np.nonzero(mask[::2, ::2])
     if not len(xs):
         return LaneAnalysis(None), {}
@@ -201,16 +201,18 @@ def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[Lane
     tracks = {"left": [], "right": []}
     row_tapes = {}
 
+    origin = {}
+
     def expect(side, z):
         other, sign = ("right", -1) if side == "left" else ("left", 1)
         if tracks[side]:
-            return _predict(tracks[side], z), BEV_TRACK_TOL_CM
+            return _predict(tracks[side], z), BEV_TRACK_TOL_CM, origin[side]
         remembered = tracker.predict(side, z) if tracker is not None else None
         if remembered is not None:
-            return remembered, TRACK_MEMORY_TOL_CM
+            return remembered, TRACK_MEMORY_TOL_CM, "memory"
         if tracks[other]:
-            return _predict(tracks[other], z) + sign * width, BEV_LANE_WIDTH_TOL * width
-        return None, None
+            return _predict(tracks[other], z) + sign * width, BEV_LANE_WIDTH_TOL * width, "other"
+        return None, None, None
 
     for z in np.arange(z_near + BEV_BIN_CM / 2, z_far, BEV_BIN_CM):
         row = pts[np.abs(pts[:, 1] - z) < BEV_BIN_CM / 2, 0]
@@ -219,24 +221,34 @@ def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[Lane
             continue
         row_tapes[z] = tapes
         expected = {side: expect(side, z) for side in ("left", "right")}
-        if all(pred is None for pred, _ in expected.values()):
+        if all(pred is None for pred, _, _ in expected.values()):
             hits = _seed_sides(tapes)
+            sources = {side: "pair" if len(hits) == 2 else "lone" for side in hits}
         else:
-            hits = {}
-            for side, (pred, tol) in expected.items():
+            hits, sources = {}, {}
+            for side, (pred, tol, src) in expected.items():
                 if pred is None:
                     continue
                 best = min(tapes, key=lambda x: abs(x - pred))
                 if abs(best - pred) <= tol and best not in hits.values():
-                    hits[side] = best
+                    hits[side], sources[side] = best, src
         for side, x in hits.items():
             tracks[side].append((z, x))
+            origin.setdefault(side, sources[side])
 
     fits = {side: tuple(np.polyfit(*np.array(t).T, 1)) for side, t in tracks.items()
             if len(t) >= MIN_TRACK_BINS and not _hugs_frame_edge(t, mask.shape[1])}
+    if len(fits) == 2:
+        (ml, bl), (mr, br) = fits["left"], fits["right"]
+        zm = np.mean([z for z, _ in tracks["left"] + tracks["right"]])
+        gap = ((mr - ml) * zm + br - bl) / np.hypot(1, (ml + mr) / 2)
+        if abs(gap - width) > BEV_LANE_WIDTH_TOL * width:
+            del fits[min(fits, key=lambda side: len(tracks[side]))]
     paired = (len(fits) == 2 and abs(fits["left"][0] - fits["right"][0]) <= PAIR_SLOPE_TOL)
     if not paired:
-        fits = {side: f for side, f in fits.items() if abs(f[0]) <= STEEP_TAPE_SLOPE}
+        guessed = {side for side, src in origin.items()
+                   if src == "lone" or (src == "other" and origin.get("right" if side == "left" else "left") == "lone")}
+        fits = {side: f for side, f in fits.items() if side not in guessed or abs(f[0]) <= STEEP_TAPE_SLOPE}
     if len(fits) == 1 and len(tracks[next(iter(fits))]) < LONE_TAPE_MIN_BINS:
         fits = {}
     if not fits:
@@ -250,9 +262,9 @@ def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[Lane
         if xl is not None and xr is not None:
             centre = (xl + xr) / 2
         elif xl is not None:
-            centre = xl + half
+            centre = xl + half * np.hypot(1, fits["left"][0])
         elif xr is not None:
-            centre = xr - half
+            centre = xr - half * np.hypot(1, fits["right"][0])
         else:
             continue
         centres.append((z, centre))
