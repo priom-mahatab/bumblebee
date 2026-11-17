@@ -44,6 +44,7 @@ BEV_CLUSTER_GAP_CM = 4.0
 BEV_MAX_TAPE_WIDTH_CM = 10.0
 BEV_TRACK_TOL_CM = 8.0
 BEV_LANE_WIDTH_TOL = 0.4
+PAIR_WIDTH_TOL = 0.25
 BEV_MIN_BINS = 2
 TRACK_MEMORY_FRAMES = 5
 TRACK_MEMORY_TOL_CM = 10.0
@@ -226,12 +227,11 @@ def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[Lane
             sources = {side: "pair" if len(hits) == 2 else "lone" for side in hits}
         else:
             hits, sources = {}, {}
-            for side, (pred, tol, src) in expected.items():
-                if pred is None:
-                    continue
-                best = min(tapes, key=lambda x: abs(x - pred))
-                if abs(best - pred) <= tol and best not in hits.values():
-                    hits[side], sources[side] = best, src
+            candidates = sorted((abs(x - pred), side, x, src) for side, (pred, tol, src) in expected.items()
+                                if pred is not None for x in tapes if abs(x - pred) <= tol)
+            for _, side, x, src in candidates:
+                if side not in hits and x not in hits.values():
+                    hits[side], sources[side] = x, src
         for side, x in hits.items():
             tracks[side].append((z, x))
             origin.setdefault(side, sources[side])
@@ -242,7 +242,7 @@ def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[Lane
         (ml, bl), (mr, br) = fits["left"], fits["right"]
         zm = np.mean([z for z, _ in tracks["left"] + tracks["right"]])
         gap = ((mr - ml) * zm + br - bl) / np.hypot(1, (ml + mr) / 2)
-        if abs(gap - width) > BEV_LANE_WIDTH_TOL * width:
+        if abs(gap - width) > PAIR_WIDTH_TOL * width:
             del fits[min(fits, key=lambda side: len(tracks[side]))]
     paired = (len(fits) == 2 and abs(fits["left"][0] - fits["right"][0]) <= PAIR_SLOPE_TOL)
     if not paired:
