@@ -15,6 +15,7 @@ MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
+DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
 LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
 
 
@@ -112,6 +113,11 @@ def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_
     limit = min(MAX_STEER_DELTA, speed)
     delta = max(-limit, min(limit, STEER_GAIN_PWM * lane_offset))
     return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
+
+
+def trim_drive(left: int, right: int, trim: float = DRIVE_TRIM) -> tuple[int, int]:
+    """Correct for uneven motor sides by scaling left PWM up and right PWM down by trim, then reapplying the stall rules."""
+    return _drive_pwm(round(left * (1 + trim))), _drive_pwm(round(right * (1 - trim)))
 
 
 def _drive_pwm(v: int) -> int:

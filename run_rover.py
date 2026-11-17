@@ -2,7 +2,7 @@
 import argparse
 import time
 
-from control.motor_control import Motors, Ultrasonic, lane_keep_drive
+from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_keep_drive, trim_drive
 from control.state_machine import Action, DrivingController
 from runlog import RunLogger
 from vision.camera import PiCameraSource
@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--no-frames", action="store_true", help="log telemetry only, don't save frames")
     parser.add_argument("--frame-every", type=int, default=1, help="save every Nth frame (default 1)")
     parser.add_argument("--roi", default="rover", choices=sorted(LANE_PROFILES), help="lane profile (default rover)")
+    parser.add_argument("--trim", type=float, default=DRIVE_TRIM,
+                        help=f"motor imbalance correction, left up / right down by this fraction (default {DRIVE_TRIM}; 0 disables)")
     args = parser.parse_args()
 
     cam = PiCameraSource()
@@ -50,7 +52,7 @@ def main():
                 left_lane_exists=lanes.left_lane_exists,
                 right_lane_exists=lanes.right_lane_exists,
             )
-            l, r = lane_keep_drive(action, lanes.offset)
+            l, r = trim_drive(*lane_keep_drive(action, lanes.offset), args.trim)
             motors.drive(l, r)
 
             logger.log({
