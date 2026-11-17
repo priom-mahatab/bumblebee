@@ -7,13 +7,14 @@ from control.state_machine import Action
 PWM_HZ = 1000
 FAILSAFE_S = 0.5          # cut motors if no command within this window
 
-BASE_SPEED = 140          # forward PWM, 0..255 (motors stall below ~60)
-SLOW_SPEED = 90
+BASE_SPEED = 110          # forward PWM, 0..255 (motors stall below ~60)
+SLOW_SPEED = 80
 TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
-MAX_STEER_DELTA = 60
+MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
+MAX_PWM = 255
 LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
 
 
@@ -104,13 +105,20 @@ class Ultrasonic:
 
 
 def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED) -> tuple[int, int]:
-    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping actions."""
+    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping actions; the inner wheel may stop on hard turns."""
     if action not in LANE_KEEP_ACTIONS or lane_offset is None:
         return action_to_drive(action, base)
     speed = SLOW_SPEED if action is Action.SLOW else base
-    limit = min(MAX_STEER_DELTA, speed - MIN_DRIVE_PWM)
+    limit = min(MAX_STEER_DELTA, speed)
     delta = max(-limit, min(limit, STEER_GAIN_PWM * lane_offset))
-    return round(speed + delta), round(speed - delta)
+    return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
+
+
+def _drive_pwm(v: int) -> int:
+    """Clamp one side's PWM: held at stall PWM just below it, stopped well below it, capped at MAX_PWM."""
+    if v < MIN_DRIVE_PWM / 2:
+        return 0
+    return min(MAX_PWM, max(MIN_DRIVE_PWM, v))
 
 
 def action_to_drive(action: Action, base: int = BASE_SPEED) -> tuple[int, int]:

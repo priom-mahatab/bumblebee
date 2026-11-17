@@ -9,7 +9,7 @@ from vision.camera import PiCameraSource
 from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
 from vision.obstacles import detect_obstacles
 
-CRUISE_SPEED_MPS = 0.3   # assumed forward speed; dead-reckons odometry for lane-change progress (no encoders)
+CRUISE_SPEED_MPS = 0.2   # assumed forward speed; dead-reckons odometry for lane-change progress (no encoders)
 LOOP_HZ = 15
 
 
