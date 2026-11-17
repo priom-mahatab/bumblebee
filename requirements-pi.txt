@@ -1,17 +1,4 @@
-# Everything the Raspberry Pi needs to run the rover loop (run_rover.py).
-# Install THIS FILE ONLY on the Pi -- do NOT also install requirements.txt,
-# which carries the laptop/training stack (ultralytics -> torch + CUDA,
-# matplotlib) that the rover never uses and that wastes disk and time on the Pi.
-#
-#   python3 -m venv --system-site-packages .venv
-#   source .venv/bin/activate
-#   pip install -r requirements-pi.txt
-#
-# picamera2 is NOT pip-installable -- it needs system libcamera, so install it
-# via apt (which is why the venv uses --system-site-packages):
-#   sudo apt update && sudo apt install -y python3-picamera2 --no-install-recommends
-# If opencv complains about a missing libGL at import: sudo apt install -y libgl1
 numpy
 opencv-python
 gpiozero
-lgpio       # gpiozero's pin-factory backend on Raspberry Pi OS Bookworm
+lgpio       
