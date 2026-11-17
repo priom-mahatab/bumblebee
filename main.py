@@ -1,6 +1,6 @@
 """Full pipeline runner: frame source -> lane + object detection -> control decision -> annotated video."""
+import argparse
 import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -9,7 +9,7 @@ import cv2
 from control.state_machine import StopSignController, lead_vehicle_closeness
 from detection.infer import detect
 from vision.camera import VideoSource, WebcamSource
-from vision.lane_detection import compute_lane_offset
+from vision.lane_detection import DEFAULT_PROFILE, LANE_PROFILES, compute_lane_offset
 
 OUT_DIR = "runs/pipeline"
 
@@ -38,7 +38,12 @@ def annotate(frame, lane_offset, detections, action, closeness):
 
 
 def main():
-    video_path = sys.argv[1] if len(sys.argv) > 1 else None
+    parser = argparse.ArgumentParser(description="Run the full pipeline on a video file or the webcam.")
+    parser.add_argument("video", nargs="?", help="video file (omit for webcam)")
+    parser.add_argument("--roi", default=DEFAULT_PROFILE, choices=sorted(LANE_PROFILES),
+                        help=f"lane profile (default {DEFAULT_PROFILE})")
+    args = parser.parse_args()
+    video_path = args.video
     if video_path:
         source = VideoSource(video_path)
         fps = source.fps
@@ -66,7 +71,7 @@ def main():
                     break
                 continue
 
-            lane_offset = compute_lane_offset(frame)
+            lane_offset = compute_lane_offset(frame, roi=args.roi)
             detections = detect(frame)
             closeness = lead_vehicle_closeness(detections, frame.shape[1], frame.shape[0])
             action = controller.update(

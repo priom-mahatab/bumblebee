@@ -1,5 +1,5 @@
 """Turns a raw frame into lane geometry: current-lane center offset plus adjacent-lane flags."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import cv2
@@ -24,15 +24,53 @@ def _fit_lane_line(segments, y_bottom, y_top):
     return (int(m * y_bottom + b), y_bottom), (int(m * y_top + b), y_top)
 
 
-# ROI trapezoid as (x_frac, y_frac) corners; camera-specific (sim passes its own).
-REAL_ROI = [(0.10, 0.82), (0.95, 0.82), (0.58, 0.60), (0.42, 0.60)]
-
 # Half lane width as fraction of frame width; reconstructs center from one boundary.
 LANE_HALF_WIDTH_FRAC = 0.215
 
 # Segments within this many px at the ROI bottom are the same boundary.
 LANE_LINE_MERGE_PX = 40
 MIN_SEGMENTS_PER_BOUNDARY = 1
+MIN_ABS_SLOPE = 0.5
+
+ROVER_TAPE_HSV = ((95, 80, 80), (125, 255, 255))
+
+
+@dataclass(frozen=True)
+class LaneProfile:
+    """Per-camera lane settings: ROI corners (bottom-left, bottom-right, top-right, top-left as frame fractions), min |dy/dx| per segment, boundary merge distance, half lane width for one-boundary frames, and an optional HSV range that replaces grayscale edges with a colour mask."""
+    roi: tuple
+    min_abs_slope: float = MIN_ABS_SLOPE
+    merge_px: int = LANE_LINE_MERGE_PX
+    lane_half_width_frac: float = LANE_HALF_WIDTH_FRAC
+    hsv_range: tuple | None = None
+
+
+LANE_PROFILES = {
+    "dashcam": LaneProfile(roi=((0.10, 0.82), (0.95, 0.82), (0.58, 0.60), (0.42, 0.60))),
+    "sim": LaneProfile(roi=((0.0, 0.88), (1.0, 0.88), (0.80, 0.48), (0.20, 0.48))),
+    "rover": LaneProfile(roi=((0.0, 0.98), (1.0, 0.98), (1.0, 0.58), (0.0, 0.58)),
+                         min_abs_slope=0.1, merge_px=150, lane_half_width_frac=0.27,
+                         hsv_range=ROVER_TAPE_HSV),
+}
+DEFAULT_PROFILE = "dashcam"
+
+
+def get_profile(name: str) -> LaneProfile:
+    """Look up a named lane profile, raising ValueError for unknown names."""
+    try:
+        return LANE_PROFILES[name]
+    except KeyError:
+        raise ValueError(f"unknown lane profile {name!r}; choose from {sorted(LANE_PROFILES)}") from None
+
+
+def _lane_pixels(frame: np.ndarray, hsv_range) -> np.ndarray:
+    """Binary lane-candidate image: Canny edges of the grayscale frame, or the denoised HSV colour mask when a range is given."""
+    if hsv_range is None:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    color = cv2.inRange(hsv, np.array(hsv_range[0]), np.array(hsv_range[1]))
+    return cv2.morphologyEx(color, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
 
 def _segment_bottom_x(seg: tuple[int, int, int, int], y_bottom: int) -> float:
@@ -66,13 +104,14 @@ def _cluster_boundaries(segments, y_bottom, y_top, merge_px, min_segments):
     return fits
 
 
-def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
-                  merge_px: int = LANE_LINE_MERGE_PX,
+def analyze_lanes(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.85,
+                  merge_px: int | None = None,
                   min_segments: int = MIN_SEGMENTS_PER_BOUNDARY) -> LaneAnalysis:
-    """Full lane read: current-lane offset plus adjacent-lane flags; adjacency needs an ROI wide enough to contain neighbouring boundaries."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 150)
+    """Full lane read (roi is a profile name, or a corner list using dashcam settings); adjacency needs an ROI wide enough to contain neighbouring boundaries."""
+    profile = get_profile(roi) if isinstance(roi, str) else replace(get_profile(DEFAULT_PROFILE), roi=roi)
+    roi = profile.roi
+    merge_px = profile.merge_px if merge_px is None else merge_px
+    edges = _lane_pixels(frame, profile.hsv_range)
 
     h, w = edges.shape
     mask = np.zeros_like(edges)
@@ -88,7 +127,7 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
     for x1, y1, x2, y2 in lines.reshape(-1, 4):
         if x2 == x1:
             continue
-        if abs((y2 - y1) / (x2 - x1)) < 0.5:           # drop near-horizontal non-lane lines
+        if y2 == y1 or abs((y2 - y1) / (x2 - x1)) < profile.min_abs_slope:
             continue
         segments.append((x1, y1, x2, y2))
 
@@ -110,7 +149,7 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
     def sample_x(fit):
         return fit[0][0] + lookahead * (fit[1][0] - fit[0][0])
 
-    half_w = LANE_HALF_WIDTH_FRAC * w
+    half_w = profile.lane_half_width_frac * w
     left_fit = boundaries[left_idx] if left_idx is not None else None
     right_fit = boundaries[right_idx] if right_idx is not None else None
     if left_fit is not None and right_fit is not None:
@@ -128,7 +167,7 @@ def analyze_lanes(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85,
     return LaneAnalysis(offset, left_lane_exists, right_lane_exists, boundaries)
 
 
-def compute_lane_offset(frame: np.ndarray, roi=REAL_ROI, lookahead: float = 0.85) -> float | None:
+def compute_lane_offset(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.85) -> float | None:
     """Current-lane center offset only, a thin wrapper over analyze_lanes for existing callers."""
     return analyze_lanes(frame, roi, lookahead).offset
 

@@ -34,6 +34,7 @@ class Detection:
 
 
 STOP_DISTANCE_CM = 15
+LANE_LOST_ACTION = Action.SLOW
 SLOW_DISTANCE_CM = 40
 LANE_OFFSET_DEADZONE = 0.08  # fraction of half-frame-width
 IN_PATH_X_RANGE = (0.3, 0.7)  # fraction of frame width
@@ -97,6 +98,7 @@ def decide_action(
     distance_cm: float | None,
     frame_width: int = 640,
     frame_height: int = 480,
+    lane_lost_action: Action = LANE_LOST_ACTION,
 ) -> Action:
     """Pure, stateless per-frame decision for lanes, obstacles, and ultrasonic (not stop signs)."""
 
@@ -114,7 +116,7 @@ def decide_action(
         return Action.SLOW
 
     if lane_offset is None:
-        return Action.SLOW
+        return lane_lost_action
     if lane_offset > LANE_OFFSET_DEADZONE:
         return Action.TURN_RIGHT
     if lane_offset < -LANE_OFFSET_DEADZONE:
@@ -298,8 +300,10 @@ class LaneChangeController:
 class DrivingController:
     """Top-level coordinator applying the priority ladder: stop-sign hold > lane change > ultrasonic/obstacle slow-stop (decide_action)."""
 
-    def __init__(self, lane_change: "LaneChangeController | None" = None) -> None:
+    def __init__(self, lane_change: "LaneChangeController | None" = None,
+                 lane_lost_action: Action = LANE_LOST_ACTION) -> None:
         self.stop_sign = StopSignController()
+        self.lane_lost_action = lane_lost_action
         self.lane_change = lane_change if lane_change is not None else LaneChangeController()
 
     def update(
@@ -328,7 +332,8 @@ class DrivingController:
         if lane_override is not None:
             return lane_override
 
-        return decide_action(lane_offset, detections, distance_cm, frame_width, frame_height)
+        return decide_action(lane_offset, detections, distance_cm, frame_width, frame_height,
+                             self.lane_lost_action)
 
 
 class SpeedLimitTracker:
@@ -364,6 +369,8 @@ if __name__ == "__main__":
     for label, offset, dets, dist in cases:
         action = decide_action(offset, dets, dist)
         print(f"{label:38s} -> {action.value}")
+    print(f"{'lane lost, lane_lost_action=STOP':38s} -> "
+          f"{decide_action(None, [], None, lane_lost_action=Action.STOP).value}")
 
     print("\nStopSignController range-and-dead-reckon (sign 10 m ahead, stop 1 m before):")
     controller = StopSignController()
