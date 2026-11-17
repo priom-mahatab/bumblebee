@@ -2,11 +2,11 @@
 import argparse
 import time
 
-from control.motor_control import Motors, Ultrasonic, action_to_drive
+from control.motor_control import Motors, Ultrasonic, lane_keep_drive
 from control.state_machine import Action, DrivingController
 from runlog import RunLogger
 from vision.camera import PiCameraSource
-from vision.lane_detection import LANE_PROFILES, analyze_lanes
+from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
 from vision.obstacles import detect_obstacles
 
 CRUISE_SPEED_MPS = 0.3   # assumed forward speed; dead-reckons odometry for lane-change progress (no encoders)
@@ -24,6 +24,7 @@ def main():
     motors = Motors()
     sonar = Ultrasonic()
     controller = DrivingController(lane_lost_action=Action.STOP)
+    tracker = LaneTracker()
     logger = RunLogger(save_frames=not args.no_frames, frame_every=args.frame_every)
     period = 1.0 / LOOP_HZ
     start = time.monotonic()
@@ -34,7 +35,7 @@ def main():
             if frame is None:
                 continue
             h, w = frame.shape[:2]
-            lanes = analyze_lanes(frame, roi=args.roi)
+            lanes = analyze_lanes(frame, roi=args.roi, tracker=tracker)
             detections = detect_obstacles(frame)
             distance_cm = sonar.read_cm()
             odometry_m = CRUISE_SPEED_MPS * (time.monotonic() - start)
@@ -49,7 +50,7 @@ def main():
                 left_lane_exists=lanes.left_lane_exists,
                 right_lane_exists=lanes.right_lane_exists,
             )
-            l, r = action_to_drive(action)
+            l, r = lane_keep_drive(action, lanes.offset)
             motors.drive(l, r)
 
             logger.log({

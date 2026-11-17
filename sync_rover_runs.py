@@ -25,16 +25,18 @@ def pull(host: str, remote_repo: str) -> list[Path]:
 
 def preview(run_dir: Path, profile: str) -> int:
     """Write ROI-preview overlays for every saved frame of a run into <run>/preview/ and return how many were written."""
+    from vision.lane_detection import LaneTracker
     from vision.roi_preview import render
 
     out_dir = run_dir / "preview"
     out_dir.mkdir(exist_ok=True)
     count = 0
+    tracker = LaneTracker()
     for path in sorted((run_dir / "frames").glob("*.jpg")):
         frame = cv2.imread(str(path))
         if frame is None:
             continue
-        out, _ = render(frame, profile)
+        out, _ = render(frame, profile, tracker)
         cv2.imwrite(str(out_dir / path.name), out)
         count += 1
     return count

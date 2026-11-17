@@ -11,6 +11,10 @@ BASE_SPEED = 140          # forward PWM, 0..255 (motors stall below ~60)
 SLOW_SPEED = 90
 TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
+MIN_DRIVE_PWM = 60
+STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
+MAX_STEER_DELTA = 60
+LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
 
 
 class Wheel:
@@ -97,6 +101,16 @@ class Ultrasonic:
 
     def close(self):
         self.sensor.close()
+
+
+def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED) -> tuple[int, int]:
+    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping actions."""
+    if action not in LANE_KEEP_ACTIONS or lane_offset is None:
+        return action_to_drive(action, base)
+    speed = SLOW_SPEED if action is Action.SLOW else base
+    limit = min(MAX_STEER_DELTA, speed - MIN_DRIVE_PWM)
+    delta = max(-limit, min(limit, STEER_GAIN_PWM * lane_offset))
+    return round(speed + delta), round(speed - delta)
 
 
 def action_to_drive(action: Action, base: int = BASE_SPEED) -> tuple[int, int]:

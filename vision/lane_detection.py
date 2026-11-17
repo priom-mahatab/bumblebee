@@ -4,10 +4,12 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 import cv2
 
+from vision.birdseye import floor_to_image, image_to_floor
+
 
 @dataclass
 class LaneAnalysis:
-    """One frame's lane read: signed offset (fraction of half-frame-width, negative = left of center, None if no lane), adjacent-lane flags, and fitted boundaries left->right."""
+    """One frame's lane read: signed offset (fraction of half-frame-width, or lateral/lookahead on the floor plane for bird's-eye profiles; negative = steer left, None if no lane), adjacent-lane flags, and fitted boundaries left->right."""
     offset: float | None
     left_lane_exists: bool = False
     right_lane_exists: bool = False
@@ -34,15 +36,33 @@ MIN_ABS_SLOPE = 0.5
 
 ROVER_TAPE_HSV = ((95, 80, 80), (125, 255, 255))
 
+TRACK_LANE_WIDTH_CM = 41.0
+BEV_Z_RANGE_CM = (40.0, 120.0)
+BEV_BIN_CM = 5.0
+BEV_LOOKAHEAD_CM = 60.0
+BEV_CLUSTER_GAP_CM = 4.0
+BEV_MAX_TAPE_WIDTH_CM = 10.0
+BEV_TRACK_TOL_CM = 8.0
+BEV_LANE_WIDTH_TOL = 0.4
+BEV_MIN_BINS = 2
+TRACK_MEMORY_FRAMES = 5
+TRACK_MEMORY_TOL_CM = 10.0
+STEEP_TAPE_SLOPE = 0.7
+PAIR_SLOPE_TOL = 0.35
+LONE_TAPE_MIN_BINS = 4
+MIN_TRACK_BINS = 3
+FRAME_EDGE_MARGIN_PX = 12
+
 
 @dataclass(frozen=True)
 class LaneProfile:
-    """Per-camera lane settings: ROI corners (bottom-left, bottom-right, top-right, top-left as frame fractions), min |dy/dx| per segment, boundary merge distance, half lane width for one-boundary frames, and an optional HSV range that replaces grayscale edges with a colour mask."""
+    """Per-camera lane settings: ROI corners (bottom-left, bottom-right, top-right, top-left as frame fractions), min |dy/dx| per segment, boundary merge distance, half lane width for one-boundary frames, an optional HSV range that replaces grayscale edges with a colour mask, and whether to track tape on the calibrated floor plane instead of fitting image lines."""
     roi: tuple
     min_abs_slope: float = MIN_ABS_SLOPE
     merge_px: int = LANE_LINE_MERGE_PX
     lane_half_width_frac: float = LANE_HALF_WIDTH_FRAC
     hsv_range: tuple | None = None
+    birdseye: bool = False
 
 
 LANE_PROFILES = {
@@ -50,7 +70,7 @@ LANE_PROFILES = {
     "sim": LaneProfile(roi=((0.0, 0.88), (1.0, 0.88), (0.80, 0.48), (0.20, 0.48))),
     "rover": LaneProfile(roi=((0.0, 0.98), (1.0, 0.98), (1.0, 0.58), (0.0, 0.58)),
                          min_abs_slope=0.1, merge_px=150, lane_half_width_frac=0.27,
-                         hsv_range=ROVER_TAPE_HSV),
+                         hsv_range=ROVER_TAPE_HSV, birdseye=True),
 }
 DEFAULT_PROFILE = "dashcam"
 
@@ -104,10 +124,160 @@ def _cluster_boundaries(segments, y_bottom, y_top, merge_px, min_segments):
     return fits
 
 
+def _row_tapes(xs: np.ndarray) -> list[float]:
+    """Split one depth bin's floor x values into tape crossings, dropping clusters too wide to be a tape running forward."""
+    xs = np.sort(xs)
+    clusters = np.split(xs, np.nonzero(np.diff(xs) > BEV_CLUSTER_GAP_CM)[0] + 1)
+    return [float(c.mean()) for c in clusters if c[-1] - c[0] <= BEV_MAX_TAPE_WIDTH_CM]
+
+
+def _seed_sides(tapes: list[float]) -> dict:
+    """Pick the ego lane's left/right tape from the nearest bin: a pair about one lane width apart, else a lone tape by which side of the rover it is on."""
+    pairs = [(a, b) for i, a in enumerate(tapes) for b in tapes[i + 1:]
+             if abs(b - a - TRACK_LANE_WIDTH_CM) <= BEV_LANE_WIDTH_TOL * TRACK_LANE_WIDTH_CM]
+    if pairs:
+        a, b = min(pairs, key=lambda p: abs((p[0] + p[1]) / 2))
+        return {"left": a, "right": b}
+    lone = min(tapes, key=abs)
+    return {"left" if lone < 0 else "right": lone}
+
+
+def _predict(track: list[tuple[float, float]], z: float) -> float:
+    if len(track) < 2:
+        return track[-1][1]
+    (z0, x0), (z1, x1) = track[-2], track[-1]
+    return x1 + (x1 - x0) / (z1 - z0) * (z - z1)
+
+
+class LaneTracker:
+    """Remembers each ego tape's floor line (x = m*z + b) for a few frames so a lone tape keeps its side; use one per camera stream."""
+
+    def __init__(self, memory_frames: int = TRACK_MEMORY_FRAMES):
+        self.memory_frames = memory_frames
+        self.lines = {"left": None, "right": None}
+        self.age = {"left": 0, "right": 0}
+
+    def predict(self, side: str, z: float) -> float | None:
+        """Remembered x of this side's tape at depth z, or None if forgotten."""
+        line = self.lines[side]
+        return None if line is None else line[0] * z + line[1]
+
+    def update(self, fits: dict) -> None:
+        """Store this frame's fitted tape lines and age out sides that were not seen."""
+        for side in ("left", "right"):
+            if side in fits:
+                self.lines[side], self.age[side] = fits[side], 0
+            elif self.lines[side] is not None:
+                self.age[side] += 1
+                if self.age[side] > self.memory_frames:
+                    self.lines[side] = None
+
+
+def _hugs_frame_edge(track: list[tuple[float, float]], frame_w: int) -> bool:
+    """True if most of a track's points sit at the image's left/right border, i.e. a tape cut off by the frame edge rather than one running forward."""
+    img_x = floor_to_image(np.array([(x, z) for z, x in track]))[:, 0]
+    near_edge = (img_x < FRAME_EDGE_MARGIN_PX) | (img_x > frame_w - FRAME_EDGE_MARGIN_PX)
+    return near_edge.mean() > 0.5
+
+
+def _analyze_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> LaneAnalysis:
+    """Bird's-eye lane read that also feeds the tracker its tape lines for the next frame."""
+    analysis, fits = _track_birdseye(mask, tracker)
+    if tracker is not None:
+        tracker.update(fits)
+    return analysis
+
+
+def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[LaneAnalysis, dict]:
+    """Track the ego tapes bin by bin outward on the floor plane, seeded from tracker memory when available, and steer toward the lane centre at the lookahead distance; tapes steeper than STEEP_TAPE_SLOPE count only as a parallel pair, and a lone tape must span LONE_TAPE_MIN_BINS bins."""
+    ys, xs = np.nonzero(mask[::2, ::2])
+    if not len(xs):
+        return LaneAnalysis(None), {}
+    pts = image_to_floor(np.c_[xs * 2, ys * 2])
+    z_near, z_far = BEV_Z_RANGE_CM
+    pts = pts[(pts[:, 1] >= z_near) & (pts[:, 1] < z_far)]
+
+    width, half = TRACK_LANE_WIDTH_CM, TRACK_LANE_WIDTH_CM / 2
+    tracks = {"left": [], "right": []}
+    row_tapes = {}
+
+    def expect(side, z):
+        other, sign = ("right", -1) if side == "left" else ("left", 1)
+        if tracks[side]:
+            return _predict(tracks[side], z), BEV_TRACK_TOL_CM
+        remembered = tracker.predict(side, z) if tracker is not None else None
+        if remembered is not None:
+            return remembered, TRACK_MEMORY_TOL_CM
+        if tracks[other]:
+            return _predict(tracks[other], z) + sign * width, BEV_LANE_WIDTH_TOL * width
+        return None, None
+
+    for z in np.arange(z_near + BEV_BIN_CM / 2, z_far, BEV_BIN_CM):
+        row = pts[np.abs(pts[:, 1] - z) < BEV_BIN_CM / 2, 0]
+        tapes = _row_tapes(row) if len(row) else []
+        if not tapes:
+            continue
+        row_tapes[z] = tapes
+        expected = {side: expect(side, z) for side in ("left", "right")}
+        if all(pred is None for pred, _ in expected.values()):
+            hits = _seed_sides(tapes)
+        else:
+            hits = {}
+            for side, (pred, tol) in expected.items():
+                if pred is None:
+                    continue
+                best = min(tapes, key=lambda x: abs(x - pred))
+                if abs(best - pred) <= tol and best not in hits.values():
+                    hits[side] = best
+        for side, x in hits.items():
+            tracks[side].append((z, x))
+
+    fits = {side: tuple(np.polyfit(*np.array(t).T, 1)) for side, t in tracks.items()
+            if len(t) >= MIN_TRACK_BINS and not _hugs_frame_edge(t, mask.shape[1])}
+    paired = (len(fits) == 2 and abs(fits["left"][0] - fits["right"][0]) <= PAIR_SLOPE_TOL)
+    if not paired:
+        fits = {side: f for side, f in fits.items() if abs(f[0]) <= STEEP_TAPE_SLOPE}
+    if len(fits) == 1 and len(tracks[next(iter(fits))]) < LONE_TAPE_MIN_BINS:
+        fits = {}
+    if not fits:
+        return LaneAnalysis(None), {}
+
+    points = {side: dict(tracks[side]) for side in fits}
+    centres = []
+    left_lane = right_lane = False
+    for z, tapes in row_tapes.items():
+        xl, xr = points.get("left", {}).get(z), points.get("right", {}).get(z)
+        if xl is not None and xr is not None:
+            centre = (xl + xr) / 2
+        elif xl is not None:
+            centre = xl + half
+        elif xr is not None:
+            centre = xr - half
+        else:
+            continue
+        centres.append((z, centre))
+        left_lane |= any(x < centre - 1.5 * half - BEV_TRACK_TOL_CM for x in tapes)
+        right_lane |= any(x > centre + 1.5 * half + BEV_TRACK_TOL_CM for x in tapes)
+
+    if len(centres) < BEV_MIN_BINS:
+        return LaneAnalysis(None), fits
+    zs, cs = np.array(centres).T
+    z_look = float(np.clip(BEV_LOOKAHEAD_CM, zs.min(), zs.max()))
+    offset = float(np.polyval(np.polyfit(zs, cs, 1), z_look)) / z_look
+
+    boundaries = []
+    for side, (m, b) in fits.items():
+        tz = np.array(tracks[side])[:, 0]
+        ends = floor_to_image(np.array([[m * tz.min() + b, tz.min()], [m * tz.max() + b, tz.max()]]))
+        boundaries.append(tuple((int(x), int(y)) for x, y in ends))
+    return LaneAnalysis(offset, left_lane, right_lane, boundaries), fits
+
+
 def analyze_lanes(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.85,
                   merge_px: int | None = None,
-                  min_segments: int = MIN_SEGMENTS_PER_BOUNDARY) -> LaneAnalysis:
-    """Full lane read (roi is a profile name, or a corner list using dashcam settings); adjacency needs an ROI wide enough to contain neighbouring boundaries."""
+                  min_segments: int = MIN_SEGMENTS_PER_BOUNDARY,
+                  tracker: LaneTracker | None = None) -> LaneAnalysis:
+    """Full lane read (roi is a profile name, or a corner list using dashcam settings); adjacency needs an ROI wide enough to contain neighbouring boundaries, and tracker carries tape memory across frames for bird's-eye profiles."""
     profile = get_profile(roi) if isinstance(roi, str) else replace(get_profile(DEFAULT_PROFILE), roi=roi)
     roi = profile.roi
     merge_px = profile.merge_px if merge_px is None else merge_px
@@ -118,6 +288,8 @@ def analyze_lanes(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.8
     polygon = np.array([[(int(fx * w), int(fy * h)) for fx, fy in roi]], dtype=np.int32)
     cv2.fillPoly(mask, polygon, 255)
     masked = cv2.bitwise_and(edges, mask)
+    if profile.birdseye:
+        return _analyze_birdseye(masked, tracker)
 
     lines = cv2.HoughLinesP(masked, 2, np.pi / 180, 50, minLineLength=40, maxLineGap=100)
     if lines is None:

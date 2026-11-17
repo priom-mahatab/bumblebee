@@ -106,17 +106,17 @@ def decide_action(
         return Action.STOP
 
     closeness = lead_vehicle_closeness(detections, frame_width, frame_height)
-    if closeness is not None:
-        if closeness >= OBSTACLE_STOP_CLOSENESS:
-            return Action.STOP
-        if closeness >= OBSTACLE_SLOW_CLOSENESS:
-            return Action.SLOW
-
-    if distance_cm is not None and distance_cm < SLOW_DISTANCE_CM:
-        return Action.SLOW
+    if closeness is not None and closeness >= OBSTACLE_STOP_CLOSENESS:
+        return Action.STOP
 
     if lane_offset is None:
         return lane_lost_action
+
+    if closeness is not None and closeness >= OBSTACLE_SLOW_CLOSENESS:
+        return Action.SLOW
+    if distance_cm is not None and distance_cm < SLOW_DISTANCE_CM:
+        return Action.SLOW
+
     if lane_offset > LANE_OFFSET_DEADZONE:
         return Action.TURN_RIGHT
     if lane_offset < -LANE_OFFSET_DEADZONE:
@@ -371,6 +371,8 @@ if __name__ == "__main__":
         print(f"{label:38s} -> {action.value}")
     print(f"{'lane lost, lane_lost_action=STOP':38s} -> "
           f"{decide_action(None, [], None, lane_lost_action=Action.STOP).value}")
+    print(f"{'lane lost + sonar 30cm, STOP':38s} -> "
+          f"{decide_action(None, [], 30, lane_lost_action=Action.STOP).value}")
 
     print("\nStopSignController range-and-dead-reckon (sign 10 m ahead, stop 1 m before):")
     controller = StopSignController()
