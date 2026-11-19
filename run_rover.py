@@ -3,12 +3,12 @@ import argparse
 import time
 
 from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_keep_drive, trim_drive
-from control.state_machine import (ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM, Action, DrivingController,
-                                   LaneChangeController, LaneChangePhase)
+from control.state_machine import (ROVER_CAMERA_TRIGGER_CM, ROVER_IN_PATH_HALF_WIDTH_CM, ROVER_SONAR_CONFIRM_CM,
+                                   Action, DrivingController, LaneChangeController, LaneChangePhase)
 from runlog import RunLogger
 from vision.camera import PiCameraSource
 from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
-from vision.obstacles import detect_obstacles
+from vision.obstacles import detect_obstacles, nearest_obstacle_cm
 
 CRUISE_SPEED_MPS = 0.2   # assumed forward speed; dead-reckons odometry for lane-change progress (no encoders)
 LOOP_HZ = 15
@@ -22,7 +22,7 @@ def main():
     parser.add_argument("--trim", type=float, default=DRIVE_TRIM,
                         help=f"motor imbalance correction, left up / right down by this fraction (default {DRIVE_TRIM}; 0 disables)")
     parser.add_argument("--lane", choices=("left", "right"),
-                        help="starting lane; enables sonar-triggered lane changes (off without it)")
+                        help="starting lane; enables camera-triggered, sonar-confirmed lane changes (off without it)")
     args = parser.parse_args()
 
     cam = PiCameraSource()
@@ -30,7 +30,9 @@ def main():
     sonar = Ultrasonic()
     lane_change = LaneChangeController(
         trigger_closeness=None,
-        trigger_distance_cm=ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM if args.lane else None,
+        trigger_distance_cm=None,
+        camera_trigger_cm=ROVER_CAMERA_TRIGGER_CM if args.lane else None,
+        sonar_confirm_cm=ROVER_SONAR_CONFIRM_CM,
         current_lane=args.lane,
         closed_loop=True)
     controller = DrivingController(lane_change=lane_change, lane_lost_action=Action.STOP)
@@ -47,6 +49,7 @@ def main():
             h, w = frame.shape[:2]
             lanes = analyze_lanes(frame, roi=args.roi, tracker=tracker)
             detections = detect_obstacles(frame)
+            obstacle_cm = nearest_obstacle_cm(frame, ROVER_IN_PATH_HALF_WIDTH_CM)
             distance_cm = sonar.read_cm()
             odometry_m = CRUISE_SPEED_MPS * (time.monotonic() - start)
 
@@ -60,6 +63,7 @@ def main():
                 odometry_m=odometry_m,
                 left_lane_exists=lanes.left_lane_exists,
                 right_lane_exists=lanes.right_lane_exists,
+                obstacle_cm=obstacle_cm,
             )
             if phase_before is LaneChangePhase.IN_LANE and lane_change.phase is LaneChangePhase.CHANGING:
                 tracker.shift_lane(lane_change.direction)
@@ -74,6 +78,7 @@ def main():
                 "right_lane": lanes.right_lane_exists,
                 "dist_cm": round(distance_cm, 1),
                 "obstacles": len(detections),
+                "obstacle_cm": None if obstacle_cm is None else round(obstacle_cm, 1),
                 "action": action.value,
                 "lane": lane_change.current_lane,
                 "lc_phase": lane_change.phase.value,
@@ -82,7 +87,7 @@ def main():
                 "odometry_m": round(odometry_m, 3),
             }, frame)
             print(f"[{logger.count:5d}] offset={lanes.offset} dist={distance_cm:5.1f}cm "
-                  f"obstacles={len(detections)} -> {action.value:11s} drive=({l},{r})")
+                  f"obstacles={len(detections)} cam={obstacle_cm} -> {action.value:11s} drive=({l},{r})")
 
             dt = time.monotonic() - t0
             if dt < period:
