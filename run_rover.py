@@ -3,7 +3,8 @@ import argparse
 import time
 
 from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_keep_drive, trim_drive
-from control.state_machine import Action, DrivingController
+from control.state_machine import (ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM, Action, DrivingController,
+                                   LaneChangeController)
 from runlog import RunLogger
 from vision.camera import PiCameraSource
 from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
@@ -20,12 +21,18 @@ def main():
     parser.add_argument("--roi", default="rover", choices=sorted(LANE_PROFILES), help="lane profile (default rover)")
     parser.add_argument("--trim", type=float, default=DRIVE_TRIM,
                         help=f"motor imbalance correction, left up / right down by this fraction (default {DRIVE_TRIM}; 0 disables)")
+    parser.add_argument("--lane", choices=("left", "right"),
+                        help="starting lane; enables sonar-triggered lane changes (off without it)")
     args = parser.parse_args()
 
     cam = PiCameraSource()
     motors = Motors()
     sonar = Ultrasonic()
-    controller = DrivingController(lane_lost_action=Action.STOP)
+    lane_change = LaneChangeController(
+        trigger_closeness=None,
+        trigger_distance_cm=ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM if args.lane else None,
+        current_lane=args.lane)
+    controller = DrivingController(lane_change=lane_change, lane_lost_action=Action.STOP)
     tracker = LaneTracker()
     logger = RunLogger(save_frames=not args.no_frames, frame_every=args.frame_every)
     period = 1.0 / LOOP_HZ
@@ -64,6 +71,8 @@ def main():
                 "dist_cm": round(distance_cm, 1),
                 "obstacles": len(detections),
                 "action": action.value,
+                "lane": lane_change.current_lane,
+                "lc_phase": lane_change.phase.value,
                 "drive_l": l,
                 "drive_r": r,
                 "odometry_m": round(odometry_m, 3),
