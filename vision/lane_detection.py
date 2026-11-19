@@ -145,14 +145,6 @@ def _seed_sides(tapes: list[float]) -> dict:
     return {"left" if lone < 0 else "right": lone}
 
 
-def _shift_line(line: tuple[float, float] | None, dx: float) -> tuple[float, float] | None:
-    """Move a floor line x = m*z + b sideways by dx cm measured perpendicular to it."""
-    if line is None:
-        return None
-    m, b = line
-    return m, b + dx * float(np.hypot(1, m))
-
-
 def _predict(track: list[tuple[float, float]], z: float) -> float:
     if len(track) < 2:
         return track[-1][1]
@@ -172,17 +164,6 @@ class LaneTracker:
         """Remembered x of this side's tape at depth z, or None if forgotten."""
         line = self.lines[side]
         return None if line is None else line[0] * z + line[1]
-
-    def shift_lane(self, direction: str, width: float = TRACK_LANE_WIDTH_CM) -> None:
-        """Relabel the remembered tapes one lane over toward direction, so lane keeping steers into that lane."""
-        sign = 1 if direction == "right" else -1
-        ahead, behind = ("right", "left") if direction == "right" else ("left", "right")
-        divider = self.lines[ahead] or _shift_line(self.lines[behind], sign * width)
-        if divider is None:
-            return
-        self.lines[behind] = divider
-        self.lines[ahead] = _shift_line(divider, sign * width)
-        self.age = {"left": 0, "right": 0}
 
     def update(self, fits: dict) -> None:
         """Store this frame's fitted tape lines and age out sides that were not seen."""

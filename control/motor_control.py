@@ -13,15 +13,12 @@ TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
-CHANGE_MAX_HEADING = 0.45  # lane change: hold at most this angle to the lane (dx/dz, about 24 degrees) while crossing
-CHANGE_EASE_CM = 15.0  # lane change: within this of the new centre, ease the target angle down toward straight
-CHANGE_HEADING_GAIN_PWM = 300  # lane change: PWM differential per unit of angle error
+S_CURVE_ARC_PWM = (220, 60)  # outer, inner wheel PWM for the arcs of a timed lane-change S-curve
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
 DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
-SONAR_QUEUE_LEN = 3       # median window; shorter cuts lag, 3 still holds the motor-noise false echo above 50 cm
+SONAR_QUEUE_LEN = 3       # median window; shorter cuts lag for the sonar confirm and emergency stop
 LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
-LANE_CHANGE_ACTIONS = (Action.CHANGE_LEFT, Action.CHANGE_RIGHT)
 
 
 class Wheel:
@@ -111,25 +108,23 @@ class Ultrasonic:
         self.sensor.close()
 
 
-def change_target_heading(centre_cm: float) -> float:
-    """Angle to hold during a lane change: CHANGE_MAX_HEADING toward the new centre, easing to straight over the last CHANGE_EASE_CM."""
-    return -CHANGE_MAX_HEADING * max(-1.0, min(1.0, centre_cm / CHANGE_EASE_CM))
-
-
-def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED,
-                    heading: float | None = None, centre_cm: float | None = None) -> tuple[int, int]:
-    """Map an Action to (left, right) PWM: lane keeping steers in proportion to lane_offset, lane changes steer the rover's angle toward change_target_heading so it crosses at a capped angle; the inner wheel may stop on hard turns."""
-    steering = LANE_KEEP_ACTIONS + LANE_CHANGE_ACTIONS
-    if action not in steering or lane_offset is None:
+def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED) -> tuple[int, int]:
+    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping actions; the inner wheel may stop on hard turns."""
+    if action not in LANE_KEEP_ACTIONS or lane_offset is None:
         return action_to_drive(action, base)
     speed = SLOW_SPEED if action is Action.SLOW else base
-    if action in LANE_CHANGE_ACTIONS and heading is not None and centre_cm is not None:
-        delta = CHANGE_HEADING_GAIN_PWM * (heading - change_target_heading(centre_cm))
-    else:
-        delta = STEER_GAIN_PWM * lane_offset
     limit = min(MAX_STEER_DELTA, speed)
-    delta = max(-limit, min(limit, delta))
+    delta = max(-limit, min(limit, STEER_GAIN_PWM * lane_offset))
     return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
+
+
+def s_curve_drive(direction: str, segment: str, base: int = BASE_SPEED) -> tuple[int, int]:
+    """(left, right) PWM for one segment of a timed lane-change S-curve toward direction: arc out, straight, arc back."""
+    if segment == "straight":
+        return base, base
+    outer, inner = S_CURVE_ARC_PWM
+    turn_right = (direction == "right") == (segment == "out")
+    return (outer, inner) if turn_right else (inner, outer)
 
 
 def trim_drive(left: int, right: int, trim: float = DRIVE_TRIM) -> tuple[int, int]:
