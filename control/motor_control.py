@@ -13,13 +13,13 @@ TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
-CHANGE_STEER_GAIN_PWM = 320  # lane change: steering stays maxed until about halfway into the new lane
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
 DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
-SONAR_QUEUE_LEN = 3       # median window; shorter cuts lag, 3 still holds the motor-noise false echo above 50 cm
+SONAR_QUEUE_LEN = 3       # median window; shorter cuts lag for the lane-change trigger and emergency stop
+VERY_SLOW_PWM = 75        # rover lane change: approach and crossing speed, just above the ~60 stall
+SPIN_PWM = 105            # rover lane change: spin in place, one side forward and the other backward
 LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
-LANE_CHANGE_ACTIONS = (Action.CHANGE_LEFT, Action.CHANGE_RIGHT)
 
 
 class Wheel:
@@ -110,15 +110,23 @@ class Ultrasonic:
 
 
 def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED) -> tuple[int, int]:
-    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping and lane-change actions (the latter with a stronger gain); the inner wheel may stop on hard turns."""
-    steering = LANE_KEEP_ACTIONS + LANE_CHANGE_ACTIONS
-    if action not in steering or lane_offset is None:
+    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping actions; the inner wheel may stop on hard turns."""
+    if action not in LANE_KEEP_ACTIONS or lane_offset is None:
         return action_to_drive(action, base)
     speed = SLOW_SPEED if action is Action.SLOW else base
-    gain = CHANGE_STEER_GAIN_PWM if action in LANE_CHANGE_ACTIONS else STEER_GAIN_PWM
     limit = min(MAX_STEER_DELTA, speed)
-    delta = max(-limit, min(limit, gain * lane_offset))
+    delta = max(-limit, min(limit, STEER_GAIN_PWM * lane_offset))
     return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
+
+
+def lane_change_drive(direction: str | None, step: str, lane_offset: float | None) -> tuple[int, int]:
+    """(left, right) PWM for one RoverLaneChange step: lane keeping very slowly while arming, spins in place toward direction and back, and a very slow straight crossing."""
+    if step == "slowing":
+        return lane_keep_drive(Action.FORWARD, lane_offset, base=VERY_SLOW_PWM)
+    if step == "cross":
+        return VERY_SLOW_PWM, VERY_SLOW_PWM
+    spin_right = (direction == "right") == (step == "spin_out")
+    return (SPIN_PWM, -SPIN_PWM) if spin_right else (-SPIN_PWM, SPIN_PWM)
 
 
 def trim_drive(left: int, right: int, trim: float = DRIVE_TRIM) -> tuple[int, int]:
@@ -127,10 +135,11 @@ def trim_drive(left: int, right: int, trim: float = DRIVE_TRIM) -> tuple[int, in
 
 
 def _drive_pwm(v: int) -> int:
-    """Clamp one side's PWM: held at stall PWM just below it, stopped well below it, capped at MAX_PWM."""
-    if v < MIN_DRIVE_PWM / 2:
+    """Clamp one side's PWM by magnitude, keeping its sign (negative = reverse): held at stall PWM just below it, stopped well below it, capped at MAX_PWM."""
+    if abs(v) < MIN_DRIVE_PWM / 2:
         return 0
-    return min(MAX_PWM, max(MIN_DRIVE_PWM, v))
+    sign = 1 if v > 0 else -1
+    return sign * min(MAX_PWM, max(MIN_DRIVE_PWM, abs(v)))
 
 
 def action_to_drive(action: Action, base: int = BASE_SPEED) -> tuple[int, int]:

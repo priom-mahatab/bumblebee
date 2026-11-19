@@ -2,15 +2,14 @@
 import argparse
 import time
 
-from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_keep_drive, trim_drive
-from control.state_machine import (ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM, Action, DrivingController,
-                                   LaneChangeController, LaneChangePhase)
+from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_change_drive, lane_keep_drive, trim_drive
+from control.state_machine import Action, DrivingController, LaneChangeController, RoverLaneChange
 from runlog import RunLogger
 from vision.camera import PiCameraSource
-from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
+from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes, forward_tape_cm
 from vision.obstacles import detect_obstacles
 
-CRUISE_SPEED_MPS = 0.2   # assumed forward speed; dead-reckons odometry for lane-change progress (no encoders)
+CRUISE_SPEED_MPS = 0.2   # assumed forward speed; dead-reckoned odometry for logging and the stop-sign controller
 LOOP_HZ = 15
 
 
@@ -23,21 +22,23 @@ def main():
                         help=f"motor imbalance correction, left up / right down by this fraction (default {DRIVE_TRIM}; 0 disables)")
     parser.add_argument("--lane", choices=("left", "right"),
                         help="starting lane; enables sonar-triggered lane changes (off without it)")
+    parser.add_argument("--test-change", type=float, metavar="SECONDS",
+                        help="with --lane, start one lane change this many seconds in, without an obstacle")
     args = parser.parse_args()
+    if args.test_change is not None and not args.lane:
+        parser.error("--test-change needs --lane")
 
     cam = PiCameraSource()
     motors = Motors()
     sonar = Ultrasonic()
-    lane_change = LaneChangeController(
-        trigger_closeness=None,
-        trigger_distance_cm=ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM if args.lane else None,
-        current_lane=args.lane,
-        closed_loop=True)
-    controller = DrivingController(lane_change=lane_change, lane_lost_action=Action.STOP)
+    lane_change = RoverLaneChange(args.lane) if args.lane else None
+    controller = DrivingController(lane_change=LaneChangeController(trigger_closeness=None, trigger_distance_cm=None),
+                                   lane_lost_action=Action.STOP)
     tracker = LaneTracker()
     logger = RunLogger(save_frames=not args.no_frames, frame_every=args.frame_every)
     period = 1.0 / LOOP_HZ
     start = time.monotonic()
+    test_pending = args.test_change is not None
     try:
         while True:
             t0 = time.monotonic()
@@ -49,9 +50,15 @@ def main():
             detections = detect_obstacles(frame)
             distance_cm = sonar.read_cm()
             odometry_m = CRUISE_SPEED_MPS * (time.monotonic() - start)
+            ray_cm = forward_tape_cm(frame, args.roi) if lane_change else None
+            now = time.monotonic()
 
-            phase_before = lane_change.phase
-            action = controller.update(
+            step_before = lane_change.step if lane_change else None
+            if test_pending and now - start >= args.test_change and step_before is None:
+                lane_change.begin(now)
+                test_pending = False
+            change_action = lane_change.update(distance_cm, ray_cm, now) if lane_change else None
+            action = change_action or controller.update(
                 lane_offset=lanes.offset,
                 detections=detections,
                 distance_cm=distance_cm,
@@ -60,10 +67,18 @@ def main():
                 odometry_m=odometry_m,
                 left_lane_exists=lanes.left_lane_exists,
                 right_lane_exists=lanes.right_lane_exists,
+                now=now,
             )
-            if phase_before is LaneChangePhase.IN_LANE and lane_change.phase is LaneChangePhase.CHANGING:
-                tracker.shift_lane(lane_change.direction)
-            l, r = trim_drive(*lane_keep_drive(action, lanes.offset), args.trim)
+            step = lane_change.step if lane_change else None
+            if step_before == "spin_back" and step is None:
+                tracker = LaneTracker()
+            if action is Action.STOP:
+                l, r = 0, 0
+            elif step not in (None, "aborted"):
+                l, r = lane_change_drive(lane_change.direction, step, lanes.offset)
+            else:
+                l, r = lane_keep_drive(action, lanes.offset)
+            l, r = trim_drive(l, r, args.trim)
             motors.drive(l, r)
 
             logger.log({
@@ -74,15 +89,16 @@ def main():
                 "right_lane": lanes.right_lane_exists,
                 "dist_cm": round(distance_cm, 1),
                 "obstacles": len(detections),
+                "ray_cm": None if ray_cm is None else round(ray_cm, 1),
                 "action": action.value,
-                "lane": lane_change.current_lane,
-                "lc_phase": lane_change.phase.value,
+                "lane": lane_change.current_lane if lane_change else None,
+                "lc_step": step,
                 "drive_l": l,
                 "drive_r": r,
                 "odometry_m": round(odometry_m, 3),
             }, frame)
-            print(f"[{logger.count:5d}] offset={lanes.offset} dist={distance_cm:5.1f}cm "
-                  f"obstacles={len(detections)} -> {action.value:11s} drive=({l},{r})")
+            print(f"[{logger.count:5d}] offset={lanes.offset} dist={distance_cm:5.1f}cm ray={ray_cm} "
+                  f"step={step} -> {action.value:11s} drive=({l},{r})")
 
             dt = time.monotonic() - t0
             if dt < period:

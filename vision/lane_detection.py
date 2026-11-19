@@ -53,6 +53,7 @@ PAIR_SLOPE_TOL = 0.35
 LONE_TAPE_MIN_BINS = 4
 MIN_TRACK_BINS = 3
 FRAME_EDGE_MARGIN_PX = 12
+FORWARD_RAY_HALF_WIDTH_CM = 3.0
 
 
 @dataclass(frozen=True)
@@ -143,14 +144,6 @@ def _seed_sides(tapes: list[float]) -> dict:
     return {"left" if lone < 0 else "right": lone}
 
 
-def _shift_line(line: tuple[float, float] | None, dx: float) -> tuple[float, float] | None:
-    """Move a floor line x = m*z + b sideways by dx cm measured perpendicular to it."""
-    if line is None:
-        return None
-    m, b = line
-    return m, b + dx * float(np.hypot(1, m))
-
-
 def _predict(track: list[tuple[float, float]], z: float) -> float:
     if len(track) < 2:
         return track[-1][1]
@@ -170,17 +163,6 @@ class LaneTracker:
         """Remembered x of this side's tape at depth z, or None if forgotten."""
         line = self.lines[side]
         return None if line is None else line[0] * z + line[1]
-
-    def shift_lane(self, direction: str, width: float = TRACK_LANE_WIDTH_CM) -> None:
-        """Relabel the remembered tapes one lane over toward direction, so lane keeping steers into that lane."""
-        sign = 1 if direction == "right" else -1
-        ahead, behind = ("right", "left") if direction == "right" else ("left", "right")
-        divider = self.lines[ahead] or _shift_line(self.lines[behind], sign * width)
-        if divider is None:
-            return
-        self.lines[behind] = divider
-        self.lines[ahead] = _shift_line(divider, sign * width)
-        self.age = {"left": 0, "right": 0}
 
     def update(self, fits: dict) -> None:
         """Store this frame's fitted tape lines and age out sides that were not seen."""
@@ -368,6 +350,21 @@ def analyze_lanes(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.8
     left_lane_exists = left_idx is not None and left_idx > 0
     right_lane_exists = right_idx is not None and right_idx < len(boundaries) - 1
     return LaneAnalysis(offset, left_lane_exists, right_lane_exists, boundaries)
+
+
+def forward_tape_cm(frame: np.ndarray, roi: str = "rover", half_width_cm: float = FORWARD_RAY_HALF_WIDTH_CM) -> float | None:
+    """Floor distance (cm) straight ahead of the camera to the nearest lane-tape pixel within half_width_cm of its centreline, or None; needs a bird's-eye profile and works at any angle to the tape."""
+    profile = get_profile(roi)
+    pixels = _lane_pixels(frame, profile.hsv_range)
+    h, w = pixels.shape
+    band = np.zeros_like(pixels)
+    cv2.fillPoly(band, np.array([[(int(fx * w), int(fy * h)) for fx, fy in profile.roi]], dtype=np.int32), 255)
+    ys, xs = np.nonzero(cv2.bitwise_and(pixels, band))
+    if not len(xs):
+        return None
+    pts = image_to_floor(np.c_[xs, ys])
+    ahead = pts[np.abs(pts[:, 0]) <= half_width_cm, 1]
+    return float(ahead.min()) if len(ahead) else None
 
 
 def compute_lane_offset(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.85) -> float | None:
