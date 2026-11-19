@@ -42,7 +42,9 @@ class PiCameraSource:
         from picamera2 import Picamera2  # Pi-only dependency, import lazily
 
         self.picam2 = Picamera2()
-        self.picam2.configure(self.picam2.create_preview_configuration())
+        # "RGB888" yields a 3-channel array in BGR byte order, matching OpenCV/cvtColor expectations.
+        self.picam2.configure(self.picam2.create_preview_configuration(
+            main={"format": "RGB888", "size": (640, 480)}))
         self.picam2.start()
 
     def read(self):

@@ -21,9 +21,6 @@ from control.state_machine import Detection
 GT_CLASSES = ["stop sign", "car", "person", "truck", "bus", "speed limit"]
 DT = 1.0 / spec.SIM_FPS
 
-# ROI tuned to the sim camera geometry; the real-dashcam default misses the sim's lane lines. (x_frac, y_frac)
-SIM_ROI = [(0.0, 0.88), (1.0, 0.88), (0.80, 0.48), (0.20, 0.48)]
-
 
 def gt_to_detections(gt):
     """Sim ground-truth tuples -> Detection objects (confidence 1.0; GT is exact and drives control, YOLO stays an overlay)."""
@@ -173,7 +170,7 @@ def main():
                 break
             h, w = frame.shape[:2]
 
-            lane = analyze_lanes(frame, roi=SIM_ROI)
+            lane = analyze_lanes(frame, roi="sim")
             lane_offset = lane.offset
             dist = src.nearest_obstacle_distance_cm()
             detections = detect(frame) if detect else []
