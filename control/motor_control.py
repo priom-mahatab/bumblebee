@@ -13,10 +13,13 @@ TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
+CHANGE_STEER_GAIN_PWM = 320  # lane change: steering stays maxed until about halfway into the new lane
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
 DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
+SONAR_QUEUE_LEN = 3       # median window; shorter cuts lag, 3 still holds the motor-noise false echo above 50 cm
 LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
+LANE_CHANGE_ACTIONS = (Action.CHANGE_LEFT, Action.CHANGE_RIGHT)
 
 
 class Wheel:
@@ -93,10 +96,11 @@ class Motors:
 class Ultrasonic:
     """HC-SR04 forward distance sensor; returns centimetres."""
 
-    def __init__(self, echo=27, trigger=17, max_distance_m=2.0):
+    def __init__(self, echo=27, trigger=17, max_distance_m=2.0, queue_len=SONAR_QUEUE_LEN):
         from gpiozero import DistanceSensor
 
-        self.sensor = DistanceSensor(echo=echo, trigger=trigger, max_distance=max_distance_m)
+        self.sensor = DistanceSensor(echo=echo, trigger=trigger, max_distance=max_distance_m,
+                                     queue_len=queue_len)
 
     def read_cm(self):
         return self.sensor.distance * 100
@@ -106,12 +110,14 @@ class Ultrasonic:
 
 
 def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED) -> tuple[int, int]:
-    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping actions; the inner wheel may stop on hard turns."""
-    if action not in LANE_KEEP_ACTIONS or lane_offset is None:
+    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping and lane-change actions (the latter with a stronger gain); the inner wheel may stop on hard turns."""
+    steering = LANE_KEEP_ACTIONS + LANE_CHANGE_ACTIONS
+    if action not in steering or lane_offset is None:
         return action_to_drive(action, base)
     speed = SLOW_SPEED if action is Action.SLOW else base
+    gain = CHANGE_STEER_GAIN_PWM if action in LANE_CHANGE_ACTIONS else STEER_GAIN_PWM
     limit = min(MAX_STEER_DELTA, speed)
-    delta = max(-limit, min(limit, STEER_GAIN_PWM * lane_offset))
+    delta = max(-limit, min(limit, gain * lane_offset))
     return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
 
 

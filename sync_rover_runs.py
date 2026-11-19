@@ -1,5 +1,6 @@
 """Pull new rover run logs from the Pi into runs/rover/ and optionally render ROI previews for each new run."""
 import argparse
+import csv
 import os
 import subprocess
 import sys
@@ -32,14 +33,31 @@ def preview(run_dir: Path, profile: str) -> int:
     out_dir.mkdir(exist_ok=True)
     count = 0
     tracker = LaneTracker()
+    commits = _lane_change_commits(run_dir / "log.csv")
     for path in sorted((run_dir / "frames").glob("*.jpg")):
         frame = cv2.imread(str(path))
         if frame is None:
             continue
         out, _ = render(frame, profile, tracker)
+        if int(path.stem) in commits:
+            tracker.shift_lane(commits[int(path.stem)])
         cv2.imwrite(str(out_dir / path.name), out)
         count += 1
     return count
+
+
+def _lane_change_commits(log_path: Path) -> dict[int, str]:
+    """Frames where a lane change started, mapped to its direction, so the replay relabels its tracker like the rover did."""
+    if not log_path.exists():
+        return {}
+    commits, before = {}, "in_lane"
+    with open(log_path, newline="") as f:
+        for row in csv.DictReader(f):
+            phase = row.get("lc_phase")
+            if phase == "changing" and before == "in_lane":
+                commits[int(row["frame"])] = row["action"].removeprefix("change_")
+            before = phase
+    return commits
 
 
 def main():

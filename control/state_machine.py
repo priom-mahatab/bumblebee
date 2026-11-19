@@ -24,6 +24,7 @@ class LaneChangePhase(Enum):
     IN_LANE = "in_lane"
     CHANGING = "changing"
     SETTLING = "settling"
+    ABORTED = "aborted"
 
 
 @dataclass
@@ -54,6 +55,11 @@ ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM = 45  # below the ~50 cm false echo motor 
 LANE_CHANGE_ARM_FRAMES = 3
 LANE_CHANGE_DISTANCE_M = 1.0
 LANE_SETTLE_DISTANCE_M = 0.5
+CHANGE_DONE_OFFSET = 0.08  # closed-loop change is done once the new lane's offset stays inside this
+CHANGE_DONE_FRAMES = 3
+CHANGE_MIN_DISTANCE_M = 0.1  # ignore completion until the tracker's lane relabel has taken effect
+CHANGE_TIMEOUT_M = 2.0  # closed-loop change not done by then -> abort and stop
+LANE_CHANGE_CLEAR_FRAMES = 3  # sonar must read clear this long before another change can arm
 TARGET_LANE_BLOCKED_CLOSENESS = 0.15  # bbox height fraction
 PREFERRED_SIDE = "left"
 LEFT_LANE_X_RANGE = (0.0, 0.4)
@@ -218,9 +224,11 @@ class LaneChangeController:
         left_lane_band: tuple[float, float] = LEFT_LANE_X_RANGE,
         right_lane_band: tuple[float, float] = RIGHT_LANE_X_RANGE,
         current_lane: str | None = None,
+        closed_loop: bool = False,
     ) -> None:
         self.trigger_closeness = trigger_closeness
         self.current_lane = current_lane
+        self.closed_loop = closed_loop
         self.trigger_distance_cm = trigger_distance_cm
         self.arm_frames = arm_frames
         self.change_distance_m = change_distance_m
@@ -234,6 +242,35 @@ class LaneChangeController:
         self.direction: str | None = None
         self.maneuver_start_m: float | None = None
         self.arm_streak = 0
+        self.done_streak = 0
+        self.needs_clear = False
+        self.clear_streak = 0
+
+    def _sonar_clear(self, distance_cm: float | None) -> bool:
+        return self.trigger_distance_cm is None or distance_cm is None or distance_cm >= self.trigger_distance_cm
+
+    def _closed_loop_step(self, odometry_m: float, lane_offset: float | None) -> Action | None:
+        """Steer into the target lane on the relabelled lane offset; done when it stays centred, STOP on lane loss, abort on timeout."""
+        travelled = odometry_m - self.maneuver_start_m
+        if travelled >= CHANGE_TIMEOUT_M:
+            self.phase = LaneChangePhase.ABORTED
+            return Action.STOP
+        if lane_offset is None:
+            self.done_streak = 0
+            return Action.STOP
+        centred = travelled >= CHANGE_MIN_DISTANCE_M and abs(lane_offset) < CHANGE_DONE_OFFSET
+        self.done_streak = self.done_streak + 1 if centred else 0
+        if self.done_streak >= CHANGE_DONE_FRAMES:
+            if self.current_lane is not None:
+                self.current_lane = self.direction
+            self.phase = LaneChangePhase.IN_LANE
+            self.direction = None
+            self.maneuver_start_m = None
+            self.done_streak = 0
+            self.needs_clear = True
+            self.clear_streak = 0
+            return None
+        return Action.CHANGE_LEFT if self.direction == "left" else Action.CHANGE_RIGHT
 
     def _choose_side(
         self,
@@ -267,14 +304,25 @@ class LaneChangeController:
         left_lane_exists: bool,
         right_lane_exists: bool,
         distance_cm: float | None = None,
+        lane_offset: float | None = None,
     ) -> Action | None:
+        """Advance the maneuver one frame; closed_loop mode needs lane_offset and ends on lane position instead of distance."""
+        if self.phase is LaneChangePhase.ABORTED:
+            return Action.STOP
+
         if self.phase is LaneChangePhase.IN_LANE:
+            if self.needs_clear:
+                self.clear_streak = self.clear_streak + 1 if self._sonar_clear(distance_cm) else 0
+                if self.clear_streak < LANE_CHANGE_CLEAR_FRAMES:
+                    return None
+                self.needs_clear = False
             closeness = lead_vehicle_closeness(detections, frame_width, frame_height)
             close_trigger = (self.trigger_closeness is not None and closeness is not None
                              and closeness >= self.trigger_closeness)
             dist_trigger = (self.trigger_distance_cm is not None and distance_cm is not None
                             and distance_cm < self.trigger_distance_cm)
-            if close_trigger or dist_trigger:
+            lane_ok = not self.closed_loop or lane_offset is not None
+            if (close_trigger or dist_trigger) and lane_ok:
                 self.arm_streak += 1
             else:
                 self.arm_streak = 0
@@ -290,6 +338,8 @@ class LaneChangeController:
             return None
 
         if self.phase is LaneChangePhase.CHANGING:
+            if self.closed_loop:
+                return self._closed_loop_step(odometry_m, lane_offset)
             if odometry_m - self.maneuver_start_m >= self.change_distance_m:
                 if self.current_lane is not None:
                     self.current_lane = self.direction
@@ -306,7 +356,7 @@ class LaneChangeController:
 
 
 class DrivingController:
-    """Top-level coordinator applying the priority ladder: stop-sign hold > lane change > ultrasonic/obstacle slow-stop (decide_action)."""
+    """Top-level coordinator applying the priority ladder: ultrasonic emergency stop > stop-sign hold > lane change > obstacle slow-stop (decide_action)."""
 
     def __init__(self, lane_change: "LaneChangeController | None" = None,
                  lane_lost_action: Action = LANE_LOST_ACTION) -> None:
@@ -330,13 +380,16 @@ class DrivingController:
         if now is None:
             now = time.monotonic()
 
+        if distance_cm is not None and distance_cm < STOP_DISTANCE_CM:
+            return Action.STOP
+
         stop_override = self.stop_sign.advance(detections, odometry_m, stop_sign_distance_m, now)
         if stop_override is not None:
             return stop_override
 
         lane_override = self.lane_change.update(
             detections, frame_width, frame_height, odometry_m,
-            left_lane_exists, right_lane_exists, distance_cm=distance_cm)
+            left_lane_exists, right_lane_exists, distance_cm=distance_cm, lane_offset=lane_offset)
         if lane_override is not None:
             return lane_override
 
@@ -447,3 +500,39 @@ if __name__ == "__main__":
         action = drive3.update(0.0, dets, dist, odometry_m=odom, now=0.0)
         print(f"{label:38s} -> {action.value:12s} [{drive3.lane_change.phase.value}, "
               f"lane={drive3.lane_change.current_lane}]")
+
+    print("\nRover closed-loop change (left lane): steer on the relabelled offset, done when centred, re-arm after clear:")
+    drive4 = DrivingController(LaneChangeController(
+        trigger_closeness=None, trigger_distance_cm=ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM,
+        current_lane="left", closed_loop=True))
+    closed_timeline = [
+        ("sonar 40, lane lost -> no arm",      None, 40, 0.00),
+        ("sonar 40, arm 1",                    0.0,  40, 0.02),
+        ("arm 2",                              0.0,  40, 0.04),
+        ("arm 3 -> commit right",              0.0,  40, 0.06),
+        ("relabelled, far from new centre",    0.6,  30, 0.08),
+        ("lane lost mid-change -> stop",       None, 30, 0.10),
+        ("closing in",                         0.3,  200, 0.20),
+        ("centred 1",                          0.05, 200, 0.30),
+        ("centred 2",                          0.03, 200, 0.32),
+        ("sonar 10cm mid-change -> stop",      0.1,  10, 0.32),
+        ("centred 3 -> done, lane=right",      0.02, 200, 0.34),
+        ("cone still ahead, not clear",        0.0,  30, 0.36),
+        ("clear 1",                            0.0,  200, 0.38),
+        ("clear 2",                            0.0,  200, 0.40),
+        ("clear 3 -> re-armable",              0.0,  200, 0.42),
+    ]
+    for label, offset, dist, odom in closed_timeline:
+        action = drive4.update(offset, [], dist, odometry_m=odom, now=0.0)
+        print(f"{label:38s} -> {action.value:12s} [{drive4.lane_change.phase.value}, "
+              f"lane={drive4.lane_change.current_lane}]")
+
+    print("\nRover closed-loop change that never centres -> aborts and stays stopped:")
+    drive5 = DrivingController(LaneChangeController(
+        trigger_closeness=None, trigger_distance_cm=ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM,
+        current_lane="left", closed_loop=True))
+    for label, offset, dist, odom in [("arm 1", 0.0, 40, 0.0), ("arm 2", 0.0, 40, 0.1),
+                                      ("arm 3 -> commit right", 0.0, 40, 0.2), ("stuck off-centre", 0.5, 200, 1.0),
+                                      ("timeout -> abort", 0.5, 200, 2.2), ("aborted, clear road", 0.0, 200, 3.0)]:
+        action = drive5.update(offset, [], dist, odometry_m=odom, now=0.0)
+        print(f"{label:38s} -> {action.value:12s} [{drive5.lane_change.phase.value}]")

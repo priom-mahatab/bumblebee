@@ -4,7 +4,7 @@ import time
 
 from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_keep_drive, trim_drive
 from control.state_machine import (ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM, Action, DrivingController,
-                                   LaneChangeController)
+                                   LaneChangeController, LaneChangePhase)
 from runlog import RunLogger
 from vision.camera import PiCameraSource
 from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
@@ -31,7 +31,8 @@ def main():
     lane_change = LaneChangeController(
         trigger_closeness=None,
         trigger_distance_cm=ROVER_LANE_CHANGE_TRIGGER_DISTANCE_CM if args.lane else None,
-        current_lane=args.lane)
+        current_lane=args.lane,
+        closed_loop=True)
     controller = DrivingController(lane_change=lane_change, lane_lost_action=Action.STOP)
     tracker = LaneTracker()
     logger = RunLogger(save_frames=not args.no_frames, frame_every=args.frame_every)
@@ -49,6 +50,7 @@ def main():
             distance_cm = sonar.read_cm()
             odometry_m = CRUISE_SPEED_MPS * (time.monotonic() - start)
 
+            phase_before = lane_change.phase
             action = controller.update(
                 lane_offset=lanes.offset,
                 detections=detections,
@@ -59,6 +61,8 @@ def main():
                 left_lane_exists=lanes.left_lane_exists,
                 right_lane_exists=lanes.right_lane_exists,
             )
+            if phase_before is LaneChangePhase.IN_LANE and lane_change.phase is LaneChangePhase.CHANGING:
+                tracker.shift_lane(lane_change.direction)
             l, r = trim_drive(*lane_keep_drive(action, lanes.offset), args.trim)
             motors.drive(l, r)
 
