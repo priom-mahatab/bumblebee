@@ -2,7 +2,8 @@
 import argparse
 import time
 
-from control.motor_control import DRIVE_TRIM, Motors, Ultrasonic, lane_change_drive, lane_keep_drive, trim_drive
+from control.motor_control import (DRIVE_TRIM, SPIN_PULSE_S, Motors, Ultrasonic, lane_change_drive, lane_keep_drive,
+                                   trim_drive)
 from control.state_machine import Action, DrivingController, LaneChangeController, RoverLaneChange
 from runlog import RunLogger
 from vision.camera import PiCameraSource
@@ -39,10 +40,14 @@ def main():
     period = 1.0 / LOOP_HZ
     start = time.monotonic()
     test_pending = args.test_change is not None
+    pulsed = False
     try:
         while True:
             t0 = time.monotonic()
             frame = cam.read()
+            if pulsed:
+                frame = cam.read()
+                pulsed = False
             if frame is None:
                 continue
             h, w = frame.shape[:2]
@@ -80,6 +85,10 @@ def main():
                 l, r = lane_keep_drive(action, lanes.offset)
             l, r = trim_drive(l, r, args.trim)
             motors.drive(l, r)
+            if step in ("spin_out", "spin_back") and action is not Action.STOP:
+                time.sleep(SPIN_PULSE_S)
+                motors.stop()
+                pulsed = True
 
             logger.log({
                 "frame": logger.count,

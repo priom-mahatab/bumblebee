@@ -19,6 +19,7 @@ DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM
 SONAR_QUEUE_LEN = 3       # median window; shorter cuts lag for the lane-change trigger and emergency stop
 VERY_SLOW_PWM = 75        # rover lane change: approach and crossing speed, just above the ~60 stall
 SPIN_PWM = 105            # rover lane change: spin in place, one side forward and the other backward
+SPIN_PULSE_S = 0.06       # spins run as short pulses with a stop and a fresh camera frame between, so they can't overshoot
 LANE_KEEP_ACTIONS = (Action.FORWARD, Action.TURN_LEFT, Action.TURN_RIGHT, Action.SLOW)
 
 
