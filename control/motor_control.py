@@ -13,8 +13,9 @@ TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
-CHANGE_STEER_GAIN_PWM = 320  # lane change: steering stays maxed until about halfway into the new lane
-CHANGE_HEADING_WEIGHT = 0.5  # lane change: steer against the rover's angle to the lane so it doesn't swing across
+CHANGE_MAX_HEADING = 0.45  # lane change: hold at most this angle to the lane (dx/dz, about 24 degrees) while crossing
+CHANGE_EASE_CM = 15.0  # lane change: within this of the new centre, ease the target angle down toward straight
+CHANGE_HEADING_GAIN_PWM = 300  # lane change: PWM differential per unit of angle error
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
 DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
@@ -110,20 +111,24 @@ class Ultrasonic:
         self.sensor.close()
 
 
+def change_target_heading(centre_cm: float) -> float:
+    """Angle to hold during a lane change: CHANGE_MAX_HEADING toward the new centre, easing to straight over the last CHANGE_EASE_CM."""
+    return -CHANGE_MAX_HEADING * max(-1.0, min(1.0, centre_cm / CHANGE_EASE_CM))
+
+
 def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED,
-                    heading: float | None = None) -> tuple[int, int]:
-    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping and lane-change actions; lane changes use a stronger gain plus a heading term that damps the swing across the lane; the inner wheel may stop on hard turns."""
+                    heading: float | None = None, centre_cm: float | None = None) -> tuple[int, int]:
+    """Map an Action to (left, right) PWM: lane keeping steers in proportion to lane_offset, lane changes steer the rover's angle toward change_target_heading so it crosses at a capped angle; the inner wheel may stop on hard turns."""
     steering = LANE_KEEP_ACTIONS + LANE_CHANGE_ACTIONS
     if action not in steering or lane_offset is None:
         return action_to_drive(action, base)
     speed = SLOW_SPEED if action is Action.SLOW else base
-    error, gain = lane_offset, STEER_GAIN_PWM
-    if action in LANE_CHANGE_ACTIONS:
-        gain = CHANGE_STEER_GAIN_PWM
-        if heading is not None:
-            error += CHANGE_HEADING_WEIGHT * heading
+    if action in LANE_CHANGE_ACTIONS and heading is not None and centre_cm is not None:
+        delta = CHANGE_HEADING_GAIN_PWM * (heading - change_target_heading(centre_cm))
+    else:
+        delta = STEER_GAIN_PWM * lane_offset
     limit = min(MAX_STEER_DELTA, speed)
-    delta = max(-limit, min(limit, gain * error))
+    delta = max(-limit, min(limit, delta))
     return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
 
 
