@@ -63,16 +63,18 @@ def main():
                 left_lane_exists=lanes.left_lane_exists,
                 right_lane_exists=lanes.right_lane_exists,
                 obstacle_cm=obstacle_cm,
+                heading=lanes.heading,
             )
             if phase_before is LaneChangePhase.IN_LANE and lane_change.phase is LaneChangePhase.CHANGING:
                 tracker.shift_lane(lane_change.direction)
-            l, r = trim_drive(*lane_keep_drive(action, lanes.offset), args.trim)
+            l, r = trim_drive(*lane_keep_drive(action, lanes.offset, heading=lanes.heading), args.trim)
             motors.drive(l, r)
 
             logger.log({
                 "frame": logger.count,
                 "t": round(time.monotonic() - start, 3),
                 "offset": lanes.offset,
+                "heading": None if lanes.heading is None else round(lanes.heading, 3),
                 "left_lane": lanes.left_lane_exists,
                 "right_lane": lanes.right_lane_exists,
                 "dist_cm": round(distance_cm, 1),

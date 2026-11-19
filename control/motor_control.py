@@ -14,6 +14,7 @@ CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
 CHANGE_STEER_GAIN_PWM = 320  # lane change: steering stays maxed until about halfway into the new lane
+CHANGE_HEADING_WEIGHT = 0.5  # lane change: steer against the rover's angle to the lane so it doesn't swing across
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
 DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
@@ -109,15 +110,20 @@ class Ultrasonic:
         self.sensor.close()
 
 
-def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED) -> tuple[int, int]:
-    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping and lane-change actions (the latter with a stronger gain); the inner wheel may stop on hard turns."""
+def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_SPEED,
+                    heading: float | None = None) -> tuple[int, int]:
+    """Map an Action to (left, right) PWM, steering in proportion to lane_offset for lane-keeping and lane-change actions; lane changes use a stronger gain plus a heading term that damps the swing across the lane; the inner wheel may stop on hard turns."""
     steering = LANE_KEEP_ACTIONS + LANE_CHANGE_ACTIONS
     if action not in steering or lane_offset is None:
         return action_to_drive(action, base)
     speed = SLOW_SPEED if action is Action.SLOW else base
-    gain = CHANGE_STEER_GAIN_PWM if action in LANE_CHANGE_ACTIONS else STEER_GAIN_PWM
+    error, gain = lane_offset, STEER_GAIN_PWM
+    if action in LANE_CHANGE_ACTIONS:
+        gain = CHANGE_STEER_GAIN_PWM
+        if heading is not None:
+            error += CHANGE_HEADING_WEIGHT * heading
     limit = min(MAX_STEER_DELTA, speed)
-    delta = max(-limit, min(limit, gain * lane_offset))
+    delta = max(-limit, min(limit, gain * error))
     return tuple(_drive_pwm(v) for v in (round(speed + delta), round(speed - delta)))
 
 
