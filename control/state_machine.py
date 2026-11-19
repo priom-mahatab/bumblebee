@@ -57,7 +57,7 @@ ROVER_IN_PATH_HALF_WIDTH_CM = 20  # obstacle base within this of the rover's cen
 LANE_CHANGE_ARM_FRAMES = 3
 LANE_CHANGE_DISTANCE_M = 1.0
 LANE_SETTLE_DISTANCE_M = 0.5
-S_CURVE_SECONDS = (1.2, 2.0, 0.6)  # rover lane change: arc out, straight, arc back; tape is ignored meanwhile; tuned for right
+S_CURVE_SECONDS = (0.5, 1.2, 0.5)  # rover lane change: spin out, straight, spin back; tape is ignored meanwhile; spins untuned
 S_CURVE_MAX_DT = 0.2  # cap on one frame's step through the S-curve, so a stop pauses it instead of skipping ahead
 LANE_CHANGE_CLEAR_FRAMES = 3  # sonar must read clear this long before another change can arm
 TARGET_LANE_BLOCKED_CLOSENESS = 0.15  # bbox height fraction
@@ -541,8 +541,10 @@ if __name__ == "__main__":
     s_timeline += [("tape ignored", None, 55, None, c) for c in (0.4, 0.6, 0.8)]
     s_timeline += [("sonar 10cm -> stop, curve paused", None, 10, None, 0.9)]
     s_timeline += [("resumed after 0.7 s stop", None, 55, None, 1.5)]
-    s_timeline += [("", None, 55, None, round(1.5 + 0.2 * k, 1)) for k in range(1, 17)]
-    s_timeline += [("done -> lane keeping", 0.05, 55, None, 5.0), ("lane lost after change", None, 55, None, 5.1)]
+    steps = int((sum(S_CURVE_SECONDS) - 0.8) / 0.2) + 2
+    s_timeline += [("", None, 55, None, round(1.5 + 0.2 * k, 1)) for k in range(1, steps)]
+    s_timeline += [("lane keeping in the new lane", 0.05, 55, None, round(1.5 + 0.2 * steps, 1)),
+                   ("lane lost after change", None, 55, None, round(1.6 + 0.2 * steps, 1))]
     for label, offset, dist, cam_cm, clock in s_timeline:
         action = drive7.update(offset, [], dist, now=clock, obstacle_cm=cam_cm)
         lc = drive7.lane_change

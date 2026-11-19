@@ -13,7 +13,7 @@ TURN_DELTA = 60           # lane-keeping arc: differential between sides
 CHANGE_DELTA = 110        # lane-change arc: larger differential
 MIN_DRIVE_PWM = 60
 STEER_GAIN_PWM = 250      # PWM differential per unit lane offset
-S_CURVE_ARC_PWM = (220, 60)  # outer, inner wheel PWM for the arcs of a timed lane-change S-curve
+S_CURVE_SPIN_PWM = 150    # lane-change S-curve turns spin in place: one side forward, the other backward at this PWM
 MAX_STEER_DELTA = 110     # up to the base speed: the inner wheel may stop on hard turns
 MAX_PWM = 255
 DRIVE_TRIM = 0.10         # left side is weaker: scale left PWM up and right PWM down by this fraction
@@ -119,12 +119,12 @@ def lane_keep_drive(action: Action, lane_offset: float | None, base: int = BASE_
 
 
 def s_curve_drive(direction: str, segment: str, base: int = BASE_SPEED) -> tuple[int, int]:
-    """(left, right) PWM for one segment of a timed lane-change S-curve toward direction: arc out, straight, arc back."""
+    """(left, right) PWM for one segment of a timed lane-change S-curve toward direction: spin out, straight, spin back."""
     if segment == "straight":
         return base, base
-    outer, inner = S_CURVE_ARC_PWM
+    p = S_CURVE_SPIN_PWM
     turn_right = (direction == "right") == (segment == "out")
-    return (outer, inner) if turn_right else (inner, outer)
+    return (p, -p) if turn_right else (-p, p)
 
 
 def trim_drive(left: int, right: int, trim: float = DRIVE_TRIM) -> tuple[int, int]:
@@ -133,10 +133,11 @@ def trim_drive(left: int, right: int, trim: float = DRIVE_TRIM) -> tuple[int, in
 
 
 def _drive_pwm(v: int) -> int:
-    """Clamp one side's PWM: held at stall PWM just below it, stopped well below it, capped at MAX_PWM."""
-    if v < MIN_DRIVE_PWM / 2:
+    """Clamp one side's PWM by magnitude, keeping its sign (negative = reverse): held at stall PWM just below it, stopped well below it, capped at MAX_PWM."""
+    if abs(v) < MIN_DRIVE_PWM / 2:
         return 0
-    return min(MAX_PWM, max(MIN_DRIVE_PWM, v))
+    sign = 1 if v > 0 else -1
+    return sign * min(MAX_PWM, max(MIN_DRIVE_PWM, abs(v)))
 
 
 def action_to_drive(action: Action, base: int = BASE_SPEED) -> tuple[int, int]:
