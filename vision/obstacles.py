@@ -34,20 +34,22 @@ def _blobs(frame, hsv_low, hsv_high, band_y, min_area_frac):
     return mask, [c for c in contours if cv2.contourArea(c) >= min_area]
 
 
+def _detections(contours) -> list[Detection]:
+    return [Detection(OBSTACLE_CLASS_NAME, 1.0, (x, y, x + bw, y + bh))
+            for x, y, bw, bh in map(cv2.boundingRect, contours)]
+
+
 def detect_obstacles(frame, hsv_low=OBSTACLE_HSV_LOW, hsv_high=OBSTACLE_HSV_HIGH,
                      band_y=OBSTACLE_BAND_Y, min_area_frac=MIN_OBSTACLE_AREA_FRAC) -> list[Detection]:
     """Colour-threshold the road band and return each large enough blob as a Detection box."""
     _, contours = _blobs(frame, hsv_low, hsv_high, band_y, min_area_frac)
-    detections = []
-    for c in contours:
-        x, y, bw, bh = cv2.boundingRect(c)
-        detections.append(Detection(OBSTACLE_CLASS_NAME, 1.0, (x, y, x + bw, y + bh)))
-    return detections
+    return _detections(contours)
 
 
-def nearest_obstacle_cm(frame, half_width_cm: float, hsv_low=OBSTACLE_HSV_LOW, hsv_high=OBSTACLE_HSV_HIGH,
-                        band_y=OBSTACLE_BAND_Y, min_area_frac=MIN_OBSTACLE_AREA_FRAC) -> float | None:
-    """Floor distance (cm) to the nearest obstacle base within half_width_cm of the rover's centreline, or None; the base is the blob's widest row, where the object meets the floor and its reflection on a shiny floor."""
+def detect_obstacles_with_distance(frame, half_width_cm: float, hsv_low=OBSTACLE_HSV_LOW,
+                                   hsv_high=OBSTACLE_HSV_HIGH, band_y=OBSTACLE_BAND_Y,
+                                   min_area_frac=MIN_OBSTACLE_AREA_FRAC) -> tuple[list[Detection], float | None]:
+    """detect_obstacles plus the floor distance (cm) to the nearest obstacle base within half_width_cm of the rover's centreline, or None, from one colour mask; the base is the blob's widest row, where the object meets the floor and its reflection on a shiny floor."""
     mask, contours = _blobs(frame, hsv_low, hsv_high, band_y, min_area_frac)
     nearest = None
     for c in contours:
@@ -60,7 +62,7 @@ def nearest_obstacle_cm(frame, half_width_cm: float, hsv_low=OBSTACLE_HSV_LOW, h
         floor_x, floor_z = image_to_floor(np.array([[x + cols.mean(), y + row]], dtype=np.float32))[0]
         if abs(floor_x) <= half_width_cm and (nearest is None or floor_z < nearest):
             nearest = float(floor_z)
-    return nearest
+    return _detections(contours), nearest
 
 
 if __name__ == "__main__":

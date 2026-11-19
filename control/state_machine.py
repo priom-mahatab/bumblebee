@@ -58,8 +58,8 @@ ROVER_IN_PATH_HALF_WIDTH_CM = 20  # obstacle base within this of the rover's cen
 LANE_CHANGE_ARM_FRAMES = 3
 LANE_CHANGE_DISTANCE_M = 1.0
 LANE_SETTLE_DISTANCE_M = 0.5
-CHANGE_DONE_OFFSET = 0.08  # closed-loop change is done once the new lane's offset stays inside this
-CHANGE_DONE_FRAMES = 3
+CHANGE_DONE_OFFSET = 0.15  # closed-loop change is done once the new lane's offset stays inside this; lane keeping centres the rest
+CHANGE_DONE_FRAMES = 5  # long enough that a swing through zero mid-overshoot doesn't count
 CHANGE_MIN_DISTANCE_M = 0.1  # ignore completion until the tracker's lane relabel has taken effect
 CHANGE_TIMEOUT_M = 2.0  # closed-loop change not done by then -> abort and stop
 LANE_CHANGE_CLEAR_FRAMES = 3  # sonar must read clear this long before another change can arm
@@ -528,10 +528,14 @@ if __name__ == "__main__":
         ("relabelled, far from new centre",    0.6,  30, 0.08),
         ("lane lost mid-change -> stop",       None, 30, 0.10),
         ("closing in",                         0.3,  200, 0.20),
-        ("centred 1",                          0.05, 200, 0.30),
-        ("centred 2",                          0.03, 200, 0.32),
+        ("swing through zero, not settled",    0.0,  200, 0.22),
+        ("overshoot",                          -0.3, 200, 0.24),
+        ("settled 1 (steady -0.1 is fine)",    -0.1, 200, 0.26),
+        ("settled 2",                          -0.12, 200, 0.28),
+        ("settled 3",                          -0.09, 200, 0.30),
         ("sonar 10cm mid-change -> stop",      0.1,  10, 0.32),
-        ("centred 3 -> done, lane=right",      0.02, 200, 0.34),
+        ("settled 4",                          -0.1, 200, 0.32),
+        ("settled 5 -> done, lane=right",      -0.08, 200, 0.34),
         ("cone still ahead, not clear",        0.0,  30, 0.36),
         ("clear 1",                            0.0,  200, 0.38),
         ("clear 2",                            0.0,  200, 0.40),

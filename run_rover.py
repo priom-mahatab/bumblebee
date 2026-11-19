@@ -8,7 +8,7 @@ from control.state_machine import (ROVER_CAMERA_TRIGGER_CM, ROVER_IN_PATH_HALF_W
 from runlog import RunLogger
 from vision.camera import PiCameraSource
 from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes
-from vision.obstacles import detect_obstacles, nearest_obstacle_cm
+from vision.obstacles import detect_obstacles_with_distance
 
 CRUISE_SPEED_MPS = 0.2   # assumed forward speed; dead-reckons odometry for lane-change progress (no encoders)
 LOOP_HZ = 15
@@ -48,8 +48,7 @@ def main():
                 continue
             h, w = frame.shape[:2]
             lanes = analyze_lanes(frame, roi=args.roi, tracker=tracker)
-            detections = detect_obstacles(frame)
-            obstacle_cm = nearest_obstacle_cm(frame, ROVER_IN_PATH_HALF_WIDTH_CM)
+            detections, obstacle_cm = detect_obstacles_with_distance(frame, ROVER_IN_PATH_HALF_WIDTH_CM)
             distance_cm = sonar.read_cm()
             odometry_m = CRUISE_SPEED_MPS * (time.monotonic() - start)
 
