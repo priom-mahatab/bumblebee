@@ -9,13 +9,11 @@ from vision.birdseye import floor_to_image, image_to_floor
 
 @dataclass
 class LaneAnalysis:
-    """One frame's lane read: signed offset (fraction of half-frame-width, or lateral/lookahead on the floor plane for bird's-eye profiles; negative = steer left, None if no lane), adjacent-lane flags, fitted boundaries left->right, and for bird's-eye profiles the lane centre's slope dx/dz (negative = rover angled right of the lane) and its lateral position at the rover in cm (positive = centre to the right)."""
+    """One frame's lane read: signed offset (fraction of half-frame-width, or lateral/lookahead on the floor plane for bird's-eye profiles; negative = steer left, None if no lane), adjacent-lane flags, and fitted boundaries left->right."""
     offset: float | None
     left_lane_exists: bool = False
     right_lane_exists: bool = False
     boundaries: list = field(default_factory=list)
-    heading: float | None = None
-    centre_cm: float | None = None
 
 def _fit_lane_line(segments, y_bottom, y_top):
     if not segments:
@@ -145,6 +143,14 @@ def _seed_sides(tapes: list[float]) -> dict:
     return {"left" if lone < 0 else "right": lone}
 
 
+def _shift_line(line: tuple[float, float] | None, dx: float) -> tuple[float, float] | None:
+    """Move a floor line x = m*z + b sideways by dx cm measured perpendicular to it."""
+    if line is None:
+        return None
+    m, b = line
+    return m, b + dx * float(np.hypot(1, m))
+
+
 def _predict(track: list[tuple[float, float]], z: float) -> float:
     if len(track) < 2:
         return track[-1][1]
@@ -164,6 +170,17 @@ class LaneTracker:
         """Remembered x of this side's tape at depth z, or None if forgotten."""
         line = self.lines[side]
         return None if line is None else line[0] * z + line[1]
+
+    def shift_lane(self, direction: str, width: float = TRACK_LANE_WIDTH_CM) -> None:
+        """Relabel the remembered tapes one lane over toward direction, so lane keeping steers into that lane."""
+        sign = 1 if direction == "right" else -1
+        ahead, behind = ("right", "left") if direction == "right" else ("left", "right")
+        divider = self.lines[ahead] or _shift_line(self.lines[behind], sign * width)
+        if divider is None:
+            return
+        self.lines[behind] = divider
+        self.lines[ahead] = _shift_line(divider, sign * width)
+        self.age = {"left": 0, "right": 0}
 
     def update(self, fits: dict) -> None:
         """Store this frame's fitted tape lines and age out sides that were not seen."""
@@ -277,15 +294,14 @@ def _track_birdseye(mask: np.ndarray, tracker: LaneTracker | None) -> tuple[Lane
         return LaneAnalysis(None), fits
     zs, cs = np.array(centres).T
     z_look = float(np.clip(BEV_LOOKAHEAD_CM, zs.min(), zs.max()))
-    centre_fit = np.polyfit(zs, cs, 1)
-    offset = float(np.polyval(centre_fit, z_look)) / z_look
+    offset = float(np.polyval(np.polyfit(zs, cs, 1), z_look)) / z_look
 
     boundaries = []
     for side, (m, b) in fits.items():
         tz = np.array(tracks[side])[:, 0]
         ends = floor_to_image(np.array([[m * tz.min() + b, tz.min()], [m * tz.max() + b, tz.max()]]))
         boundaries.append(tuple((int(x), int(y)) for x, y in ends))
-    return LaneAnalysis(offset, left_lane, right_lane, boundaries, float(centre_fit[0]), float(centre_fit[1])), fits
+    return LaneAnalysis(offset, left_lane, right_lane, boundaries), fits
 
 
 def analyze_lanes(frame: np.ndarray, roi=DEFAULT_PROFILE, lookahead: float = 0.85,
