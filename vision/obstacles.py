@@ -11,6 +11,11 @@ OBSTACLE_HSV_HIGH = (25, 255, 255)
 # Lower-frame band to search (fractions of height), full width so side lanes are included, not the lane trapezoid.
 OBSTACLE_BAND_Y = (0.50, 0.95)
 MIN_OBSTACLE_AREA_FRAC = 0.004  # ignore blobs smaller than this fraction of frame area
+# Rover pinhole calibration from cone frames at 40-120 cm (2026-11-25); the box width is the base, reflection included.
+CAMERA_FOCAL_PX = 898.0
+CAMERA_CENTER_X_PX = 300.0
+CAMERA_LENS_OFFSET_CM = 10.0
+CONE_WIDTH_CM = 12.7
 
 
 def _band_mask(shape, band_y):
@@ -38,6 +43,13 @@ def detect_obstacles(frame, hsv_low=OBSTACLE_HSV_LOW, hsv_high=OBSTACLE_HSV_HIGH
         x, y, bw, bh = cv2.boundingRect(c)
         detections.append(Detection(OBSTACLE_CLASS_NAME, 1.0, (x, y, x + bw, y + bh)))
     return detections
+
+
+def cone_position(detection: Detection) -> tuple[float, float]:
+    """Distance ahead of the lens and lateral offset (cm, + right) of a cone from its box width and centre."""
+    x1, _, x2, _ = detection.bbox
+    depth = CAMERA_FOCAL_PX * CONE_WIDTH_CM / (x2 - x1)
+    return depth - CAMERA_LENS_OFFSET_CM, ((x1 + x2) / 2 - CAMERA_CENTER_X_PX) * depth / CAMERA_FOCAL_PX
 
 
 if __name__ == "__main__":

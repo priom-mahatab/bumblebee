@@ -8,7 +8,7 @@ from control.state_machine import Action, DrivingController, LaneChangeControlle
 from runlog import RunLogger
 from vision.camera import PiCameraSource
 from vision.lane_detection import LANE_PROFILES, LaneTracker, analyze_lanes, forward_tape_cm
-from vision.obstacles import detect_obstacles
+from vision.obstacles import cone_position, detect_obstacles
 
 CRUISE_SPEED_MPS = 0.2   # assumed forward speed; dead-reckoned odometry for logging and the stop-sign controller
 LOOP_HZ = 15
@@ -53,6 +53,8 @@ def main():
             h, w = frame.shape[:2]
             lanes = analyze_lanes(frame, roi=args.roi, tracker=tracker)
             detections = detect_obstacles(frame)
+            nearest = max(detections, key=lambda d: d.bbox[2] - d.bbox[0], default=None)
+            cone_cm, cone_x_cm = cone_position(nearest) if nearest else (None, None)
             distance_cm = sonar.read_cm()
             odometry_m = CRUISE_SPEED_MPS * (time.monotonic() - start)
             ray_cm = forward_tape_cm(frame, args.roi) if lane_change else None
@@ -98,6 +100,8 @@ def main():
                 "right_lane": lanes.right_lane_exists,
                 "dist_cm": round(distance_cm, 1),
                 "obstacles": len(detections),
+                "cone_cm": None if cone_cm is None else round(cone_cm, 1),
+                "cone_x_cm": None if cone_x_cm is None else round(cone_x_cm, 1),
                 "ray_cm": None if ray_cm is None else round(ray_cm, 1),
                 "action": action.value,
                 "lane": lane_change.current_lane if lane_change else None,
@@ -106,7 +110,8 @@ def main():
                 "drive_r": r,
                 "odometry_m": round(odometry_m, 3),
             }, frame)
-            print(f"[{logger.count:5d}] offset={lanes.offset} dist={distance_cm:5.1f}cm ray={ray_cm} "
+            cone = "-" if cone_cm is None else f"{cone_cm:.0f}cm@{cone_x_cm:+.0f}"
+            print(f"[{logger.count:5d}] offset={lanes.offset} dist={distance_cm:5.1f}cm cone={cone} ray={ray_cm} "
                   f"step={step} -> {action.value:11s} drive=({l},{r})")
 
             dt = time.monotonic() - t0
